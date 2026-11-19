@@ -14,6 +14,19 @@ class ModelsTest {
     }
 
     @Test
+    fun practiceWebSocketUrl() {
+        val api = ApiClient("http://10.0.2.2:8080", "secret token")
+        assertEquals(
+            "ws://10.0.2.2:8080/ws/practice?token=secret+token",
+            api.practiceWsUrl(null),
+        )
+        assertEquals(
+            "wss://agent.example.com/ws/practice?token=secret+token&lead_id=7",
+            ApiClient("https://agent.example.com/", "secret token").practiceWsUrl(7),
+        )
+    }
+
+    @Test
     fun extractsServerErrorMessages() {
         assertEquals("Invalid API token", ApiClient.errorMessage(401, "{}"))
         assertEquals("cannot call now: outside calling hours", ApiClient.errorMessage(409, """{"detail":"cannot call now: outside calling hours"}"""))

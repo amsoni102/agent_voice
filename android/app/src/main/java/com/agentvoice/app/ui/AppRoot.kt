@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Event
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
@@ -22,7 +22,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -46,6 +48,7 @@ import com.agentvoice.app.ui.screens.LeadDetailScreen
 import com.agentvoice.app.ui.screens.LeadsScreen
 import com.agentvoice.app.ui.screens.MeetingsScreen
 import com.agentvoice.app.ui.screens.SettingsScreen
+import com.agentvoice.app.ui.screens.TalkScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -56,6 +59,7 @@ class AppContext(
     private val scope: CoroutineScope,
     val openLead: (Long) -> Unit,
     val openCall: (Long) -> Unit,
+    val openTalk: (Long?) -> Unit,
     val back: () -> Unit,
     val signOut: () -> Unit,
 ) {
@@ -81,10 +85,10 @@ val LocalApp = staticCompositionLocalOf<AppContext> { error("AppContext not prov
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
+    Tab("talk", "Talk", Icons.Filled.Mic),
     Tab("dashboard", "Home", Icons.Filled.Dashboard),
     Tab("leads", "Leads", Icons.Filled.People),
     Tab("calls", "Calls", Icons.Filled.Call),
-    Tab("meetings", "Meetings", Icons.Filled.Event),
     Tab("settings", "Agent", Icons.Filled.Tune),
 )
 
@@ -106,6 +110,7 @@ private fun MainScaffold(session: Session, store: SessionStore) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val api = remember(session) { ApiClient(session.serverUrl, session.token) }
+    var talkLeadId by remember { mutableStateOf<Long?>(null) }
     val app = remember(api) {
         AppContext(
             api = api,
@@ -113,6 +118,14 @@ private fun MainScaffold(session: Session, store: SessionStore) {
             scope = scope,
             openLead = { nav.navigate("lead/$it") },
             openCall = { nav.navigate("call/$it") },
+            openTalk = { id ->
+                talkLeadId = id
+                nav.navigate("talk") {
+                    popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            },
             back = { nav.popBackStack() },
             signOut = { scope.launch { store.signOut() } },
         )
@@ -143,7 +156,8 @@ private fun MainScaffold(session: Session, store: SessionStore) {
                 }
             },
         ) { padding ->
-            NavHost(nav, startDestination = "dashboard", modifier = Modifier.padding(padding)) {
+            NavHost(nav, startDestination = "talk", modifier = Modifier.padding(padding)) {
+                composable("talk") { TalkScreen(talkLeadId) }
                 composable("dashboard") { DashboardScreen() }
                 composable("leads") { LeadsScreen() }
                 composable("calls") { CallsScreen() }

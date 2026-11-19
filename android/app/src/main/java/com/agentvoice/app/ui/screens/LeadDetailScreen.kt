@@ -14,6 +14,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -88,6 +89,9 @@ fun LeadDetailScreen(leadId: Long) {
                     Text("Not callable right now: ${lead.callableReason}", color = Warn, style = MaterialTheme.typography.bodySmall)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { app.openTalk(lead.id) }) {
+                        Icon(Icons.Filled.Mic, null); Text(" Talk as this lead")
+                    }
                     Button(
                         enabled = lead.callableNow == true,
                         onClick = { app.action("Dialing…") { app.api.callLead(lead.id); res.reload() } },

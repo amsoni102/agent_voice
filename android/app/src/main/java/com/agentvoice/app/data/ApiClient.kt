@@ -12,8 +12,17 @@ import java.net.URLEncoder
 class ApiException(val code: Int, message: String) : Exception(message)
 
 /** Thin client for the AgentVoice server REST API. */
-class ApiClient(baseUrl: String, private val token: String) {
+class ApiClient(baseUrl: String, val token: String) {
     val baseUrl: String = normalizeBaseUrl(baseUrl)
+
+    fun practiceWsUrl(leadId: Long? = null): String {
+        val ws = baseUrl.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://")
+        val params = buildList {
+            add("token=${enc(token)}")
+            if (leadId != null) add("lead_id=$leadId")
+        }.joinToString("&")
+        return "$ws/ws/practice?$params"
+    }
 
     // ------------------------------------------------------------- status
     suspend fun status(): ServerStatus = obj("GET", "/api/status").toServerStatus()
@@ -176,6 +185,6 @@ class ApiClient(baseUrl: String, private val token: String) {
             }
         }
 
-        private fun enc(value: String) = URLEncoder.encode(value, "UTF-8")
+        fun enc(value: String) = URLEncoder.encode(value, "UTF-8")
     }
 }
