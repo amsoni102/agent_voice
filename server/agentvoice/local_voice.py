@@ -37,6 +37,25 @@ log = logging.getLogger("agentvoice.local")
 
 SAMPLE_RATE = 24000
 PARTIAL_EVERY_BYTES = VAD_RATE * 2 * 7 // 10  # a fresh live transcript every ~0.7 s of speech
+BARGE_IN_MS = 180  # stop the agent as soon as this much real speech overlaps it
+HOLD_UNFINISHED_S = 1.2  # extra wait when they stop on "at", "and", "my"... they're still going
+RETRACT_S = 2.5  # a reply interrupted this early was premature: forget it and keep listening
+_UNFINISHED_WORDS = frozenset(
+    "a an the and or but so to at of for with in on my our your is are was were be because like um uh "
+    "if that than then from by as about i we you it's its i'm we're you're me just".split()
+)
+
+
+_BACKCHANNEL = frozenset("mm hm mhm mmhm uh huh um yeah yep yes ok okay right sure aha ah oh".split())
+
+
+def looks_unfinished(text: str) -> bool:
+    t = (text or "").strip()
+    if t.endswith(("...", "…", ",", "-", "—")):
+        return True
+    words = re.findall(r"[a-z']+", t.lower())
+    return bool(words) and words[-1] in _UNFINISHED_WORDS
+ECHO_TAIL_S = 0.35  # the agent's voice can still come back through the mic just after playback
 
 _DNC = re.compile(r"\b(don'?t|do not|never|stop) (ever )?call|remove me|take me off|put me on .*do.not.call|do.not.call list")
 _BYE = re.compile(r"\b(good ?bye|bye|gotta go|got to go|have to go|hang up|talk later)\b")
@@ -178,6 +197,48 @@ class LocalVoiceSession:
         self.agent_started = False
         self.voicemail_mode = False
         self._speaking = False
+        # The phone plays audio long after we send it; this is when playback should finish.
+        self._audible_until = 0.0
+        self._turn_spoken: list[str] = []
+        self._turn_text: list[str] = []  # everything queued for speech this turn (echo reference)
+        self._barge_check: asyncio.Task[None] | None = None
+        self._echo_rms = 0.0  # how loud the agent's own voice comes back through the mic
+        # What the prospect has said this turn that hasn't been answered yet.
+        self._user_buffer: list[str] = []
+        self._turn_phase = ""  # "stt" | "hold" | "reply"
+        self._reply_audio_at: float | None = None
+        self._interrupted_playback = False
+
+    def agent_audible(self) -> bool:
+        return self._speaking or asyncio.get_running_loop().time() < self._audible_until + ECHO_TAIL_S
+
+    async def _send_pcm(self, chunk: bytes) -> None:
+        if not self._speaking:
+            return
+        now = asyncio.get_running_loop().time()
+        if self._reply_audio_at is None:
+            self._reply_audio_at = now
+        self._audible_until = max(now, self._audible_until) + len(chunk) / (SAMPLE_RATE * 2)
+        await self.transport.send_audio(base64.b64encode(chunk).decode())
+
+    async def _barge_in(self) -> None:
+        """Cut speaker output now. Do not start a new reply — wait until they finish talking."""
+        if not self._speaking and self._audible_until == 0.0:
+            return
+        self._interrupted_playback = True
+        self._speaking = False
+        self._audible_until = 0.0
+        await self.transport.clear()
+        if self._turn_task and not self._turn_task.done() and self._turn_task is not asyncio.current_task():
+            self._turn_task.cancel()
+        log.info("call %s: agent stopped (interrupted)", self.call_id)
+
+    async def interrupt(self) -> None:
+        """Phone already muted itself; stop generating audio on this side too."""
+        if self._finished:
+            return
+        log.info("call %s: barge-in (client)", self.call_id)
+        await self._barge_in()
 
     async def start(self) -> None:
         self._tasks.append(asyncio.create_task(self.llm.warmup(), name=f"llm-warm-{self.call_id}"))
@@ -222,7 +283,7 @@ class LocalVoiceSession:
         current = asyncio.current_task()
         if self._turn_task and self._turn_task is not current:
             self._turn_task.cancel()
-        for task in (self._early_stt, self._partial_task, self._spec):
+        for task in (self._early_stt, self._partial_task, self._spec, self._barge_check):
             if task is not None:
                 task.cancel()
         for task in self._tasks:
@@ -244,6 +305,7 @@ class LocalVoiceSession:
         if self.endpointer is not None:
             for event in self.endpointer.push(pcm):
                 await self._on_vad_event(event)
+            await self._maybe_barge_in()
             self._maybe_partial()
             return
         if self._speaking and rms_s16(pcm) > 800:
@@ -319,18 +381,28 @@ class LocalVoiceSession:
         self.request_hangup("max duration")
         await self._do_hangup()
 
+    async def _maybe_barge_in(self) -> None:
+        """Stop the agent the moment the prospect starts talking over it. Do not wait for STT."""
+        ep = self.endpointer
+        if ep is None or not self.agent_audible() or not ep.in_speech:
+            return
+        if ep.voiced_ms < BARGE_IN_MS:
+            return
+        log.info("call %s: barge-in (vad %s ms)", self.call_id, ep.voiced_ms)
+        await self._barge_in()
+
     async def _on_vad_event(self, event: VadEvent) -> None:
         if event.kind == "start":
             self._partial_at = 0
-            if self._speaking:
-                # Barge-in: the prospect talks over the agent.
-                await self.transport.clear()
+            if self._turn_phase in ("hold", "reply") and not self.agent_audible():
+                # They kept talking before we answered: drop the pending reply, their words join this turn.
                 if self._turn_task and not self._turn_task.done():
                     self._turn_task.cancel()
-                self._speaking = False
         elif event.kind == "pause":
+            if self.agent_audible():
+                return
             self._early_stt = asyncio.create_task(self._transcribe(event.audio, VAD_RATE, self.settings.whisper_model))
-            if not self.use_tools and not self._speaking:
+            if not self.use_tools:
                 self._spec = self._speculate(self._early_stt)
         elif event.kind == "resume":
             # Mid-sentence pause: the early result is now just a live partial.
@@ -341,12 +413,16 @@ class LocalVoiceSession:
                 self._spec.cancel()
                 self._spec = None
         elif event.kind == "end":
+            if self.agent_audible():
+                await self._barge_in()
             early, self._early_stt = self._early_stt, None
             spec, self._spec = self._spec, None
             if not event.audio:
                 for task in (early, spec):
                     if task is not None:
                         task.cancel()
+                if self._user_buffer and (self._turn_task is None or self._turn_task.done()):
+                    self._turn_task = asyncio.create_task(self._commit_turn())
                 return
             self.caller_spoke = True
             if self._turn_task and not self._turn_task.done():
@@ -359,6 +435,8 @@ class LocalVoiceSession:
         # Only while clearly mid-word, so a partial rarely holds up the end-of-turn transcription.
         if ep is None or not ep.in_speech or self._early_stt is not None or ep.last_prob < 0.7:
             return
+        if self.agent_audible():
+            return  # the recognizer is busy telling echo from interruptions
         if self._partial_task is not None and not self._partial_task.done():
             return
         audio = ep.speech_so_far()
@@ -395,6 +473,7 @@ class LocalVoiceSession:
     async def _handle_utterance_inner(
         self, pcm: bytes, rate: int, early: asyncio.Task[str] | None, spec: _Speculation | None
     ) -> None:
+        self._turn_phase = "stt"
         try:
             if early is not None:
                 text = await early
@@ -404,13 +483,32 @@ class LocalVoiceSession:
             log.exception("stt failed")
             await self.transport.send_event({"type": "error", "message": f"speech recognition failed: {exc}"})
             return
-        if not text:
-            if spec is not None:
-                spec.cancel()
-            return
-        self.db.add_transcript(self.call_id, "prospect", text)
-        await self.transport.send_event({"type": "transcript", "role": "prospect", "text": text})
-        await self._respond(user_text=text, prefetched=spec)
+        if text and not self._is_echo(text, strict=True):
+            self.db.add_transcript(self.call_id, "prospect", text)
+            await self.transport.send_event({"type": "transcript", "role": "prospect", "text": text})
+            self._user_buffer.append(text)
+        await self._commit_turn(spec)
+
+    async def _commit_turn(self, spec: _Speculation | None = None) -> None:
+        """Answer everything said this turn, unless they're clearly not done yet."""
+        try:
+            if not self._user_buffer or (self.endpointer is not None and self.endpointer.in_speech):
+                # Nothing to answer, or they're already talking again: the next end of speech commits.
+                if spec is not None:
+                    spec.cancel()
+                return
+            if looks_unfinished(self._user_buffer[-1]):
+                if spec is not None:
+                    spec.cancel()
+                    spec = None
+                self._turn_phase = "hold"
+                await asyncio.sleep(HOLD_UNFINISHED_S)
+            user_text = " ".join(self._user_buffer)
+            self._user_buffer.clear()
+            self._turn_phase = "reply"
+            await self._respond(user_text=user_text, prefetched=spec)
+        finally:
+            self._turn_phase = ""
 
     async def _respond(
         self, system_nudge: str = "", user_text: str = "", prefetched: _Speculation | None = None
@@ -539,6 +637,7 @@ class LocalVoiceSession:
                 text = await early
                 if not text or self._finished:
                     return
+                text = " ".join([*self._user_buffer, text])
                 spec.user_text = text
                 _intent, nudge, _end = self._plan_turn(text)
                 async for chunk in self.llm.chat_stream(self._with_nudge(self._history_with(text), nudge)):
@@ -568,6 +667,11 @@ class LocalVoiceSession:
             self.declines += 1
 
         self._model_hangup = False
+        self._turn_spoken = []
+        self._turn_text = []
+        self._reply_audio_at = None
+        self._interrupted_playback = False
+        self._echo_rms *= 0.85  # let a stale echo estimate fade so it can't lock them out
         source = None
         if prefetched is not None and prefetched.user_text == user_text and not system_nudge:
             source = prefetched.chunks()
@@ -576,6 +680,20 @@ class LocalVoiceSession:
         try:
             text = await self._stream_and_say(turn_messages, source)
         except asyncio.CancelledError:
+            played = (
+                asyncio.get_running_loop().time() - self._reply_audio_at if self._reply_audio_at is not None else 0.0
+            )
+            if user_text and played < RETRACT_S and not self._interrupted_playback:
+                # We jumped in while they were still going: forget this reply, and let what they
+                # say next join the same turn so the meaning isn't split.
+                if self.messages and self.messages[-1].get("role") == "user" and self.messages[-1].get("content") == user_text:
+                    self.messages.pop()
+                self._user_buffer.insert(0, user_text)
+            # Interrupted later: remember what was already said so the model doesn't start over.
+            elif self._turn_spoken:
+                said = " ".join(self._turn_spoken) + " —"
+                self.messages.append({"role": "assistant", "content": said})
+                self.db.add_transcript(self.call_id, "agent", said)
             raise
         except Exception as exc:  # noqa: BLE001
             log.exception("llm turn failed")
@@ -610,6 +728,7 @@ class LocalVoiceSession:
                 clean += ","
             if clean:
                 spoken.append(clean)
+                self._turn_text.append(clean)
                 queue.put_nowait(clean)
 
         try:
@@ -640,16 +759,34 @@ class LocalVoiceSession:
         self._speaking = True
         try:
             while (sentence := await queue.get()) is not None:
-                if self._finished:
+                if self._finished or not self._speaking:
                     return
                 pcm = await self._speak(sentence, self.settings.piper_bin, self.settings.piper_model)
                 for chunk in pcm16_chunk_b64(pcm or b""):
-                    if self._finished:
+                    if self._finished or not self._speaking:
                         return
-                    await self.transport.send_audio(base64.b64encode(chunk).decode())
+                    await self._send_pcm(chunk)
+                self._turn_spoken.append(sentence)
             await self.transport.mark(f"audio-{self.call_id}")
         finally:
             self._speaking = False
+
+    def _is_echo(self, text: str, strict: bool = False) -> bool:
+        """The mic picked up the agent's own words (this turn or the last reply) from the speaker.
+
+        strict: for a finished turn after playback, where short answers like "yeah" are real replies.
+        """
+        last = next((m.get("content") or "" for m in reversed(self.messages) if m.get("role") == "assistant"), "")
+        heard = re.findall(r"[a-z']+", text.lower())
+        said = set(re.findall(r"[a-z']+", f"{last} {' '.join(self._turn_text)}".lower()))
+        if not heard:
+            return not strict
+        novel = [w for w in heard if w not in said and w not in _BACKCHANNEL]
+        if strict:
+            return len(heard) >= 3 and len(novel) <= 0.2 * len(heard)
+        # Over the agent, it counts only if they said at least two words the agent didn't, and those
+        # aren't drowned in echo (Whisper mixes the speaker's words into what they say).
+        return len(novel) < 2 or len(novel) < 0.4 * len(heard)
 
     def _agent_has_spoken(self) -> bool:
         return any(m.get("role") == "assistant" and (m.get("content") or "").strip() for m in self.messages)
@@ -671,15 +808,15 @@ class LocalVoiceSession:
         self._speaking = True
         try:
             for sentence in split_sentences(text):
-                if self._finished:
+                if self._finished or not self._speaking:
                     return
                 pcm = await self._speak(sentence, self.settings.piper_bin, self.settings.piper_model)
                 if not pcm:
                     continue
                 for chunk in pcm16_chunk_b64(pcm):
-                    if self._finished:
+                    if self._finished or not self._speaking:
                         return
-                    await self.transport.send_audio(base64.b64encode(chunk).decode())
+                    await self._send_pcm(chunk)
             await self.transport.mark(f"audio-{self.call_id}")
         finally:
             self._speaking = False

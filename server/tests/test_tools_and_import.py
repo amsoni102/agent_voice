@@ -103,7 +103,9 @@ def test_instructions_contain_disclosure_and_lead_context(db):
     lead = db.get_lead(lead["id"])
     lead["research"] = {"talking_points": ["Their site doesn't look mobile-friendly."]}
     text = build_instructions(DEFAULT_PLAYBOOK, DEFAULT_AGENT_SETTINGS, lead, now_utc=MONDAY_9UTC)
-    assert "the call's recorded for quality" in text
+    assert "Disclosure line" not in text and "recorded" not in text
+    with_line = build_instructions({**DEFAULT_PLAYBOOK, "disclosure": "this call is recorded."}, DEFAULT_AGENT_SETTINGS, lead, now_utc=MONDAY_9UTC)
+    assert 'Disclosure line: "this call is recorded."' in with_line
     assert "Joe's Tacos" in text and "mobile-friendly" in text
     assert "America/Chicago" in text
     assert "never deny it" in text and "Never claim to be human" in text

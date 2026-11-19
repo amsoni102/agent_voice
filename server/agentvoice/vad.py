@@ -103,6 +103,10 @@ class SileroEndpointer:
     def in_speech(self) -> bool:
         return self._in_speech
 
+    @property
+    def voiced_ms(self) -> int:
+        return self._voiced * FRAME_MS if self._in_speech else 0
+
     def speech_so_far(self) -> bytes:
         return bytes(self._speech)
 

@@ -72,7 +72,7 @@ def test_campaign_lead_and_settings_flow(settings, db):
 
         pb = client.put("/api/settings/playbook", json={"company_name": "Acme Web"}, headers=AUTH).json()
         assert pb["company_name"] == "Acme Web"
-        assert client.put("/api/settings/playbook", json={"disclosure": " "}, headers=AUTH).status_code == 422
+        assert client.put("/api/settings/playbook", json={"disclosure": 5}, headers=AUTH).status_code == 422
         preview = client.get("/api/prompt/preview", headers=AUTH).json()
         assert "Acme Web" in preview["instructions"]
 

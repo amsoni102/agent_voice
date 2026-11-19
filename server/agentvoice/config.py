@@ -64,6 +64,42 @@ class Settings:
     kokoro_voices: str = ""
     kokoro_voice: str = "af_heart"
     kokoro_speed: float = 1.0
+    # "auto" uses Zadarma SIP when configured, else Twilio.
+    phone_provider: str = "auto"
+    zadarma_sip_login: str = ""
+    zadarma_sip_password: str = ""
+    zadarma_sip_server: str = ""
+    zadarma_sip_port: int = 5060
+    sip_local_port: int = 5062
+    sip_public_ip: str = ""
+    rtp_port_min: int = 16000
+    rtp_port_max: int = 16999
+    whatsapp_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
+    whatsapp_graph_version: str = "v23.0"
+    whatsapp_auto_answer: bool = True
+
+    @property
+    def zadarma_configured(self) -> bool:
+        return bool(self.zadarma_sip_login and self.zadarma_sip_password)
+
+    @property
+    def whatsapp_configured(self) -> bool:
+        return bool(self.whatsapp_token and self.whatsapp_phone_number_id and self.whatsapp_verify_token)
+
+    @property
+    def phone_line(self) -> str:
+        """Which carrier places outbound phone calls: "zadarma", "twilio" or ""."""
+        choice = (self.phone_provider or "auto").strip().lower()
+        if choice == "zadarma":
+            return "zadarma" if self.zadarma_configured else ""
+        if choice == "twilio":
+            return "twilio" if self.twilio_configured else ""
+        if self.zadarma_configured:
+            return "zadarma"
+        return "twilio" if self.twilio_configured else ""
 
     @property
     def openai_configured(self) -> bool:
@@ -195,4 +231,19 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         kokoro_voices=os.environ.get("KOKORO_VOICES", str(data_dir / "kokoro" / "voices-v1.0.bin")),
         kokoro_voice=os.environ.get("KOKORO_VOICE", "af_heart"),
         kokoro_speed=float(os.environ.get("KOKORO_SPEED", "1.0") or 1.0),
+        phone_provider=os.environ.get("PHONE_PROVIDER", "auto").strip().lower() or "auto",
+        zadarma_sip_login=os.environ.get("ZADARMA_SIP_LOGIN", "").strip(),
+        zadarma_sip_password=os.environ.get("ZADARMA_SIP_PASSWORD", ""),
+        zadarma_sip_server=os.environ.get("ZADARMA_SIP_SERVER", "").strip(),
+        zadarma_sip_port=int(os.environ.get("ZADARMA_SIP_PORT", "5060") or 5060),
+        sip_local_port=int(os.environ.get("SIP_LOCAL_PORT", "5062") or 5062),
+        sip_public_ip=os.environ.get("SIP_PUBLIC_IP", "").strip(),
+        rtp_port_min=int(os.environ.get("RTP_PORT_MIN", "16000") or 16000),
+        rtp_port_max=int(os.environ.get("RTP_PORT_MAX", "16999") or 16999),
+        whatsapp_token=os.environ.get("WHATSAPP_TOKEN", "").strip(),
+        whatsapp_phone_number_id=os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip(),
+        whatsapp_app_secret=os.environ.get("WHATSAPP_APP_SECRET", "").strip(),
+        whatsapp_verify_token=os.environ.get("WHATSAPP_VERIFY_TOKEN", "").strip(),
+        whatsapp_graph_version=os.environ.get("WHATSAPP_GRAPH_VERSION", "v23.0").strip() or "v23.0",
+        whatsapp_auto_answer=_bool("WHATSAPP_AUTO_ANSWER", True),
     )

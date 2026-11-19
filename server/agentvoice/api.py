@@ -119,6 +119,11 @@ class TestCallIn(BaseModel):
     phone: str | None = None
 
 
+class WhatsAppCallIn(BaseModel):
+    phone: str | None = None
+    lead_id: int | None = None
+
+
 class MeetingPatch(BaseModel):
     status: Literal["booked", "completed", "no_show", "cancelled"]
 
@@ -212,6 +217,9 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         return {
             "version": __version__,
             "twilio_configured": settings.twilio_configured,
+            "phone_line": settings.phone_line,
+            "zadarma": manager.zadarma.status if manager.zadarma is not None else None,
+            "whatsapp_configured": settings.whatsapp_configured,
             "openai_configured": settings.openai_configured,
             "gemini_configured": settings.gemini_configured,
             "voice_backend": (
@@ -252,8 +260,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.post("/api/campaigns/{campaign_id}/start", dependencies=auth)
     async def start_campaign(campaign_id: int) -> dict[str, Any]:
         campaign_or_404(campaign_id)
-        if not settings.twilio_configured or not settings.voice_available:
-            raise HTTPException(409, "configure Twilio and a voice backend (Gemini, Ollama, or OpenAI) before starting a campaign")
+        if not settings.phone_line or not settings.voice_available:
+            raise HTTPException(409, "configure a phone line (Zadarma or Twilio) and a voice backend before starting a campaign")
         return db.update_campaign(campaign_id, status="running")  # type: ignore[return-value]
 
     @app.post("/api/campaigns/{campaign_id}/pause", dependencies=auth)
@@ -505,6 +513,47 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         await manager.on_amd(call_id, answered_by)
         return Response(status_code=204)
 
+    # ------------------------------------------------------ WhatsApp Calling
+    @app.get("/whatsapp/webhook")
+    async def whatsapp_verify(
+        mode: str = Query("", alias="hub.mode"),
+        verify_token: str = Query("", alias="hub.verify_token"),
+        challenge: str = Query("", alias="hub.challenge"),
+    ) -> Response:
+        expected = settings.whatsapp_verify_token
+        if mode == "subscribe" and expected and hmac.compare_digest(verify_token, expected):
+            return Response(challenge, media_type="text/plain")
+        return Response(status_code=403)
+
+    @app.post("/whatsapp/webhook")
+    async def whatsapp_webhook(request: Request) -> Response:
+        from .whatsapp import verify_signature
+
+        body = await request.body()
+        if not verify_signature(settings.whatsapp_app_secret, body, request.headers.get("x-hub-signature-256", "")):
+            log.warning("whatsapp webhook rejected: bad signature")
+            return Response(status_code=403)
+        if manager.whatsapp is not None:
+            try:
+                payload = json.loads(body or b"{}")
+            except ValueError:
+                return Response(status_code=400)
+            manager.spawn(manager.whatsapp.handle_webhook(payload))
+        return Response(status_code=200)
+
+    @app.post("/api/whatsapp/call", dependencies=auth)
+    async def whatsapp_call(body: WhatsAppCallIn) -> dict[str, Any]:
+        lead = db.get_lead(body.lead_id) if body.lead_id else None
+        if body.lead_id and lead is None:
+            raise HTTPException(404, "lead not found")
+        phone = normalize_phone(body.phone or "") if body.phone else (lead or {}).get("phone", "")
+        if not phone:
+            raise HTTPException(422, "phone or lead_id required")
+        try:
+            return await manager.place_whatsapp_call(phone, lead)
+        except CallError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.websocket("/twilio/media")
     async def twilio_media(ws: WebSocket) -> None:
         await ws.accept()
@@ -597,6 +646,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                     await session.feed_audio(data["audio"])
                 elif kind == "mark":
                     await session.on_mark(data.get("name", ""))
+                elif kind == "interrupt":
+                    await session.interrupt()
+                elif kind == "client":
+                    log.info("call %s: browser playback=%s ua=%s", call["id"], data.get("playback"), str(data.get("ua", ""))[:120])
                 elif kind == "stop":
                     break
         except (WebSocketDisconnect, RuntimeError):
@@ -614,5 +667,14 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     async def settings_error(_: Request, exc: SettingsError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=422)
 
-    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    app.mount("/", _RevalidatedStatic(directory=WEB_DIR, html=True), name="web")
     return app
+
+
+class _RevalidatedStatic(StaticFiles):
+    """Dashboard assets: phones must pick up a new app.js right after a server update."""
+
+    def file_response(self, *args: Any, **kwargs: Any):  # noqa: ANN201
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response

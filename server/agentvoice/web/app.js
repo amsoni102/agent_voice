@@ -125,7 +125,8 @@ Views.overview = async () => {
     else if (st.voice_backend === "gemini") warn.push("Voice is Gemini (" + (st.gemini_model || "flash") + ") + local Whisper/Piper. Practice agent opens first.");
     else if (st.voice_backend === "openai_chat") warn.push("Voice is OpenAI chat (" + ((st.llm || "").split(":")[1] || "gpt-4o-mini") + ") + local Whisper/Piper. Practice agent opens first.");
     else if (st.voice_backend === "ollama") warn.push("Voice is local Ollama (" + (st.ollama_model || "llama3.2") + "). Free, a bit slower, fine for practice.");
-    if (!st.twilio_configured) warn.push("Twilio is not configured in .env (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, PUBLIC_BASE_URL): phone calls are disabled. Practice mode still works.");
+    if (st.zadarma && !st.zadarma.registered) warn.push("Zadarma SIP " + st.zadarma.login + " is not registered yet" + (st.zadarma.error ? ": " + st.zadarma.error : "") + ".");
+    if (!st.phone_line) warn.push("No phone line configured in .env (ZADARMA_SIP_LOGIN + ZADARMA_SIP_PASSWORD, or Twilio): phone calls are disabled. Practice mode still works.");
     const stat = (v, l) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`;
     const t = st.today, w = st.last_7_days;
     main.innerHTML = `
@@ -542,7 +543,7 @@ function secureUrl() {
 }
 
 const Practice = {
-  ws: null, ctx: null, stream: null, node: null, src: null, sources: [], playhead: 0, leadId: null, micLevel: 0,
+  ws: null, ctx: null, stream: null, node: null, src: null, out: null, loopback: null, sources: [], playhead: 0, leadId: null, micLevel: 0, interrupted: false, echoFloor: 0, playStarted: 0, dropAudioUntil: 0,
 
   async start() {
     const blocked = micBlockedReason();
@@ -572,6 +573,7 @@ const Practice = {
       throw err;
     }
     if (this.ctx.state === "suspended") await this.ctx.resume();
+    this.out = await this.echoCancelledOutput();
 
     const worklet = `class Cap extends AudioWorkletProcessor{constructor(){super();this.buf=[];this.n=0}process(i){const c=i[0][0];if(c){this.buf.push(new Float32Array(c));this.n+=c.length;if(this.n>=960){const o=new Float32Array(this.n);let k=0;for(const b of this.buf){o.set(b,k);k+=b.length}this.port.postMessage(o,[o.buffer]);this.buf=[];this.n=0}}return true}}registerProcessor("cap",Cap)`;
     await this.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: "application/javascript" })));
@@ -593,13 +595,45 @@ const Practice = {
       this.micLevel = Math.sqrt(sum / Math.max(1, f.length));
       const orb = $(".practice-orb");
       if (orb) orb.classList.toggle("listening", this.micLevel > 0.01);
+      this.maybeLocalInterrupt();
       const pcm24 = resampleFloat32(f, captureRate, 24000);
       this.ws.send(JSON.stringify({ type: "audio", audio: floatToPcm16B64(pcm24) }));
     };
+    this.ws.onopen = () => this.ws.send(JSON.stringify({
+      type: "client", playback: this.loopback ? "webrtc-loopback" : "direct", ua: navigator.userAgent,
+    }));
     this.ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
     this.ws.onclose = () => { this.cleanup(); renderPracticeState(); };
     this.ws.onerror = () => toast("Practice WebSocket failed", true);
     $("#pr-status").textContent = `Mic ready (${captureRate} Hz → 24 kHz). Waiting for server…`;
+  },
+
+  // Chrome's echo canceller only subtracts audio it receives over WebRTC, so Web Audio played
+  // straight to the speaker leaks back into the mic. Loop playback through a local peer
+  // connection and play the received stream, which the canceller does know about.
+  async echoCancelledOutput() {
+    try {
+      const dest = this.ctx.createMediaStreamDestination();
+      const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+      a.onicecandidate = (e) => e.candidate && b.addIceCandidate(e.candidate);
+      b.onicecandidate = (e) => e.candidate && a.addIceCandidate(e.candidate);
+      const received = new Promise((resolve) => { b.ontrack = (e) => resolve(e.streams[0]); });
+      dest.stream.getTracks().forEach((t) => a.addTrack(t, dest.stream));
+      await a.setLocalDescription(await a.createOffer());
+      await b.setRemoteDescription(a.localDescription);
+      await b.setLocalDescription(await b.createAnswer());
+      await a.setRemoteDescription(b.localDescription);
+      const stream = await Promise.race([received, new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 3000))]);
+      const el = new Audio();
+      el.srcObject = stream;
+      el.autoplay = true;
+      await el.play();
+      this.loopback = { a, b, el };
+      return dest;
+    } catch (err) {
+      console.warn("Echo-cancelled playback unavailable, using direct output", err);
+      return this.ctx.destination;
+    }
   },
 
   onMessage(m) {
@@ -624,7 +658,7 @@ const Practice = {
         $("#pr-status").textContent = m.event.message || "Error";
       }
     } else if (m.type === "ready") {
-      $("#pr-status").textContent = "Live. Say \"Hello?\" clearly, then pause — use headphones.";
+      $("#pr-status").textContent = "Live. Talk over the agent to interrupt — then pause when you're done.";
     } else if (m.type === "error") {
       toast(m.message, true);
       $("#pr-status").textContent = m.message || "Error";
@@ -633,9 +667,31 @@ const Practice = {
     }
   },
 
+  maybeLocalInterrupt() {
+    // Stop the speaker on the phone immediately — waiting for the server leaves a second of talking-over.
+    if (this.interrupted || !this.sources.length || !this.ctx) return;
+    const elapsed = this.ctx.currentTime - this.playStarted;
+    if (elapsed < 0.25) {
+      this.echoFloor = Math.max(this.echoFloor, this.micLevel);
+      return;
+    }
+    const floor = Math.max(0.04, this.echoFloor * 2.2);
+    if (this.micLevel < floor) return;
+    this.interrupted = true;
+    this.clear();
+    try { this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "interrupt" })); } catch {}
+  },
+
   async play(b64) {
     if (!this.ctx) return;
     if (this.ctx.state === "suspended") await this.ctx.resume();
+    if (this.ctx.currentTime < this.dropAudioUntil) return;
+    if (this.loopback?.el) this.loopback.el.muted = false;
+    if (!this.sources.length) {
+      this.interrupted = false;
+      this.echoFloor = 0;
+      this.playStarted = this.ctx.currentTime;
+    }
     const bin = atob(b64), n = bin.length / 2, f = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
@@ -647,7 +703,7 @@ const Practice = {
     buf.copyToChannel(f, 0);
     const s = this.ctx.createBufferSource();
     s.buffer = buf;
-    s.connect(this.ctx.destination);
+    s.connect(this.out || this.ctx.destination);
     this.playhead = Math.max(this.playhead, this.ctx.currentTime + 0.05);
     s.start(this.playhead);
     this.playhead += buf.duration;
@@ -659,7 +715,14 @@ const Practice = {
     $(".practice-orb")?.classList.add("talking");
   },
 
-  clear() { this.sources.forEach((s) => { try { s.stop(); } catch {} }); this.sources = []; this.playhead = 0; },
+  clear() {
+    this.sources.forEach((s) => { try { s.stop(); } catch {} });
+    this.sources = [];
+    this.playhead = this.ctx ? this.ctx.currentTime : 0;
+    this.dropAudioUntil = this.ctx ? this.ctx.currentTime + 0.4 : 0;
+    if (this.loopback?.el) this.loopback.el.muted = true;
+    $(".practice-orb")?.classList.remove("talking");
+  },
 
   stop() { if (this.ws) { try { this.ws.send(JSON.stringify({ type: "stop" })); } catch {} this.ws.close(); } this.cleanup(); },
 
@@ -667,7 +730,12 @@ const Practice = {
     this.clear();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close().catch(() => {});
-    this.ws = this.ctx = this.stream = this.node = this.src = null;
+    if (this.loopback) {
+      this.loopback.el.srcObject = null;
+      this.loopback.a.close();
+      this.loopback.b.close();
+    }
+    this.ws = this.ctx = this.stream = this.node = this.src = this.out = this.loopback = null;
     this.micLevel = 0;
   },
 };

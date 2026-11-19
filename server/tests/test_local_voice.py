@@ -4,8 +4,10 @@ import base64
 import random
 import struct
 
+import pytest
+
 from agentvoice.audio_util import EnergyVad, resample_s16, split_sentences
-from agentvoice.local_voice import LocalVoiceSession, classify_intent
+from agentvoice.local_voice import LocalVoiceSession, classify_intent, looks_unfinished
 from agentvoice.vad import SileroEndpointer, VadEvent
 from agentvoice.ollama_llm import _window, chat_tools, clean_tool_args, speakable
 from agentvoice.realtime import Transport
@@ -186,6 +188,94 @@ async def test_cloud_model_gets_no_canned_nudge_and_can_end_the_call(db, make_se
     assert spoken[:2] == ["Hey, it's Alex with Stellar Technologies,", "got a quick minute?"]
     assert not any("END" in s for s in spoken)
     assert session._hangup_reason == "agent wrapped up"
+    await session.stop("test")
+
+
+async def test_echo_while_agent_plays_is_ignored_and_interruption_is_remembered(db, make_settings, monkeypatch):
+    settings = make_settings(voice_backend="gemini", gemini_api_key="g-test")
+    transport, spoken = FakeTransport(), []
+    llm = ScriptLLM([["Hi, it's Alex with Stellar Technologies. We build websites and apps. "]])
+    session = make_session(db, settings, transport, llm, ["x"], spoken)
+    await session._respond()
+    assert session.agent_audible()  # the phone is still playing what was sent
+    assert session._is_echo("it's Alex with Stellar Technologies")
+    assert not session._is_echo("yeah who is this")
+
+    async def slow_stream(messages):
+        yield "Totally, so we build websites. "
+        await asyncio.sleep(10)
+        yield "never said"
+
+    llm.chat_stream = slow_stream
+
+    # Cut off right away: the reply was premature, so it's dropped and their words wait for more.
+    turn = asyncio.create_task(session._respond(user_text="Who is this?"))
+    await wait_for(lambda: len(spoken) >= 3)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert session._user_buffer == ["Who is this?"]
+    assert session.messages[-1]["content"] != "Who is this?"
+    assert "so we build websites" not in session.messages[-1]["content"]
+
+    # Cut off after playing a while: keep what was said so the model doesn't start over.
+    session._user_buffer.clear()
+    monkeypatch.setattr("agentvoice.local_voice.RETRACT_S", 0.0)
+    turn = asyncio.create_task(session._respond(user_text="Who is this?"))
+    await wait_for(lambda: len(spoken) >= 5)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert session.messages[-1]["role"] == "assistant"
+    assert "so we build websites" in session.messages[-1]["content"]
+    await session.stop("test")
+
+
+async def test_unfinished_sentence_waits_and_fragments_join_one_turn(db, make_settings, monkeypatch):
+    monkeypatch.setattr("agentvoice.local_voice.HOLD_UNFINISHED_S", 0.2)
+    settings = make_settings(voice_backend="gemini", gemini_api_key="g-test")
+    transport, spoken, heard = FakeTransport(), [], ["Yeah, can you send me an email at?"]
+    llm = ScriptLLM([["Sure, what's the address? "]])
+    session = make_session(db, settings, transport, llm, heard, spoken)
+    session.messages.append({"role": "assistant", "content": "Want me to send you some info?"})
+    assert looks_unfinished("Yeah, can you send me an email at?") and not looks_unfinished("Sure, sounds good.")
+
+    first = session._turn_task = asyncio.create_task(session._handle_utterance(b"\x00" * 32000, 16000))
+    await asyncio.sleep(0.05)
+    assert session._turn_phase == "hold" and llm.seen == []
+    # They keep talking during the hold: the pending turn yields, the next piece completes it.
+    await session._on_vad_event(VadEvent("start"))
+    await asyncio.sleep(0)
+    assert first.cancelled() or first.done()
+    heard[0] = "john at gmail dot com."
+    await session._handle_utterance(b"\x00" * 32000, 16000)
+    assert llm.seen == ["Yeah, can you send me an email at? john at gmail dot com."]
+    await session.stop("test")
+
+
+async def test_interrupt_stops_agent_immediately_without_stt(db, make_settings):
+    settings = make_settings(voice_backend="gemini", gemini_api_key="g-test")
+    transport, spoken, heard = FakeTransport(), [], ["x"]
+    llm = ScriptLLM([["We build websites and mobile apps for local businesses like yours. "]])
+    session = make_session(db, settings, transport, llm, heard, spoken)
+    await session._respond()
+    assert session.agent_audible()
+    await session.interrupt()
+    assert transport.cleared >= 1
+    assert not session.agent_audible()
+    await session.stop("test")
+
+
+async def test_echo_transcript_after_interrupt_is_dropped(db, make_settings):
+    settings = make_settings(voice_backend="gemini", gemini_api_key="g-test")
+    transport, spoken, heard = FakeTransport(), [], ["we build websites and mobile apps for local"]
+    llm = ScriptLLM([["We build websites and mobile apps for local businesses like yours. "]])
+    session = make_session(db, settings, transport, llm, heard, spoken)
+    await session._respond()
+    n = len(llm.seen)
+    await session.interrupt()
+    await session._handle_utterance(b"\x00" * 32000, 16000)
+    assert len(llm.seen) == n
     await session.stop("test")
 
 

@@ -16,7 +16,8 @@ DEFAULT_PLAYBOOK: dict[str, Any] = {
     "company_location": "Delaware",
     "callback_number": "",
     "lead_source_explanation": "I came across your business in a public business listing online.",
-    "disclosure": "the call's recorded for quality.",
+    # Optional line said once in the opening (e.g. a recording notice); empty = none.
+    "disclosure": "",
     "offer_summary": (
         "We're an IT company based in Delaware. We specialize in building websites and apps: custom "
         "business websites, online stores and mobile apps (iPhone and Android), plus the IT side "
@@ -150,7 +151,7 @@ STYLE_RULES = """\
 
 HONESTY_RULES = """\
 # Honesty and compliance (non-negotiable)
-- In your opening you MUST say the disclosure line (or a natural paraphrase that keeps every fact in it).
+- If a disclosure line is configured, say it once in your opening (a natural paraphrase is fine).
 - You speak as part of the {company_name} team ("we", "our team"). You don't need to bring up being an AI on your own.
 - If anyone sincerely asks whether you're a robot, an AI, or a real person, never deny it: say you're the AI assistant on the team and the strategy call is with a real person. Never claim to be human.
 - If they say "stop calling", "take me off your list", "don't call again", or anything similar: apologize briefly, confirm they'll be removed, call add_to_do_not_call, say goodbye and end the call. Do not try to save the sale.
@@ -164,8 +165,8 @@ HONESTY_RULES = """\
 CALL_FLOW = """\
 # Call flow
 1. Opening (outbound). Wait for them to say hello. Then: greet, say your name and company, the disclosure line,
-   and a permission question. Example shape: "Hey, is this {{contact or 'the owner'}}? ... Hi, it's {agent_name} with
-   {company_name}. Quick heads-up, {disclosure} I'll be super quick, do you have thirty seconds?"
+   what we do and a question. Example shape: "Hey, is this {{contact or 'the owner'}}? ... Hi, it's {agent_name} with
+   {company_name}, we build websites and apps for local businesses. Quick question, how are new customers finding you these days?"
 2. Gatekeeper. If you reach staff/reception, be friendly and brief: ask for the owner or whoever handles the
    website/marketing by name if you have it. If not available, ask for the best time to reach them and schedule a callback.
 3. Reason for the call. One or two sentences, tied to THEIR business. Use the research notes if available
@@ -219,8 +220,6 @@ def save_playbook(db: Database, data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} must be a list")
         if isinstance(default, str) and not isinstance(merged[key], str):
             raise ValueError(f"{key} must be text")
-    if not merged["disclosure"].strip():
-        raise ValueError("disclosure cannot be empty")
     for item in merged["objections"]:
         if not isinstance(item, dict) or not {"objection", "response"} <= set(item):
             raise ValueError("each objection needs 'objection' and 'response'")
@@ -320,8 +319,8 @@ def build_instructions(
         f"{', website ' + pb['company_website'] if pb.get('company_website') else ''}. "
         f"You call small business owners across the US to help them get more customers online, "
         f"and your job on this call is to book {pb['meeting_goal']}.\n"
-        f"Disclosure line: \"{pb['disclosure']}\"\n"
-        f"How we got their number: \"{pb['lead_source_explanation']}\"\n{callback}",
+        + (f"Disclosure line: \"{pb['disclosure']}\"\n" if pb["disclosure"].strip() else "")
+        + f"How we got their number: \"{pb['lead_source_explanation']}\"\n{callback}",
         STYLE_RULES,
         _fmt(HONESTY_RULES, pb),
         _fmt(CALL_FLOW, pb),
@@ -369,11 +368,11 @@ def build_compact_instructions(
     campaign_note = (campaign or {}).get("extra_instructions", "").strip()
     research = _research_notes(lead.get("research") or {})
     if direction == "inbound":
-        open_line = "Inbound: they called you. Greet, disclose, help."
+        open_line = "Inbound: they called you. Greet and help."
     elif direction == "practice":
         open_line = (
-            "Practice call: YOU start. Give a short outbound opening (name, company, disclosure),"
-            " ask if they have a minute, then ask about their website — do they have one,"
+            "Practice call: YOU start. Give a short outbound opening (name, company, that we build websites and apps),"
+            " then ask about their website — do they have one,"
             " how it's working, or what they'd change. One question at a time."
         )
     else:
@@ -397,13 +396,13 @@ def build_compact_instructions(
             f"You are {pb['agent_name']} from {pb['company_name']}"
             f"{' (' + pb['company_location'] + ')' if pb.get('company_location') else ''}."
             f" Goal: book {pb['meeting_goal']}.",
-            f'Disclosure (required in opening): "{pb["disclosure"]}"',
+            f'Say once in the opening: "{pb["disclosure"]}"' if pb["disclosure"].strip() else "",
             f"Offer: {pb['offer_summary']}",
             "Voice rules: 1-2 short spoken sentences only. No markdown, bullets, or URLs."
             " Sound human and brief. Ask one question, then stop. Never invent clients or prices.",
             "You're part of the team. If sincerely asked if you're AI/human, never deny it: say you're"
             " the team's AI assistant and the strategy call is with a real person.",
-            "Flow: open with name+company+disclosure+permission → one discovery question →"
+            "Flow: open with name+company+what we build+a question about their website → one discovery question →"
             " light pitch tied to their pain → offer two meeting times → book name+email.",
             f"Pricing only if asked: {pb['pricing_guidance']}",
             f"This call: {open_line} Prospect local time {local_now:%a %b %d %I:%M %p} ({tz_name}).",
@@ -471,8 +470,14 @@ def build_voice_instructions(
         f"{' (' + pb['company_website'] + ')' if pb.get('company_website') else ''}. "
         f"You know the company inside out and talk about it as \"we\". Your goal on this call is a real "
         f"conversation that ends, if it's a fit, with {pb['meeting_goal']}, where {pb['meeting_value']}.\n"
-        f"When you introduce yourself, mention once that {pb['disclosure']}\n"
-        f"If they ask how we got their number: {pb['lead_source_explanation']}",
+        + (f"When you introduce yourself, mention once that {pb['disclosure']}\n" if pb["disclosure"].strip() else "")
+        + f"If they ask how we got their number: {pb['lead_source_explanation']}",
+        "# Your opening\n"
+        "Get straight to the point, like a confident rep: your first name, the company, what we do (websites, "
+        "apps, and designing them for businesses like theirs), then one easy question about their business or "
+        "website. Skip small talk like \"how are you today\", and never mention call recording.\n"
+        "Introduce yourself once per call. If the conversation history shows you already did, or you got cut "
+        "off, don't start over: pick up from where you were, or answer what they just said.",
         f"# What you know about {pb['company_name']}\n{pb['offer_summary']}\n\nServices:\n{_bullets(pb['services'])}\n\n"
         f"Who we work with: {pb['ideal_customer']}\n\nWhy us:\n{_bullets(pb['differentiators'])}\n\n"
         f"Pricing (only if they ask, as ranges): {pb['pricing_guidance']}\n\nProof points you may cite:\n{proof}",

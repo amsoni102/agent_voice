@@ -42,6 +42,16 @@ class CallManager:
         self.settings = settings
         self.db = db
         self.twilio: TwilioClient | None = TwilioClient(settings) if settings.twilio_configured else None
+        self.zadarma: Any = None
+        self.whatsapp: Any = None
+        if settings.zadarma_configured:
+            from .zadarma import ZadarmaLine
+
+            self.zadarma = ZadarmaLine(self)
+        if settings.whatsapp_configured:
+            from .whatsapp import WhatsAppLine
+
+            self.whatsapp = WhatsAppLine(self)
         self.sessions: dict[int, Any] = {}
         self._dialer_task: asyncio.Task[Any] | None = None
         self._background: set[asyncio.Task[Any]] = set()
@@ -50,16 +60,43 @@ class CallManager:
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
+        if self.zadarma is not None:
+            self.spawn(self._start_zadarma())
         if self.settings.dialer_enabled and self._dialer_task is None:
             self._dialer_task = asyncio.create_task(self._dialer_loop(), name="dialer")
+
+    async def _start_zadarma(self) -> None:
+        try:
+            await self.zadarma.start()
+        except Exception as exc:  # noqa: BLE001
+            self.zadarma.ua.last_error = f"SIP start failed: {exc}"
+            log.exception("Zadarma SIP could not start")
 
     async def shutdown(self) -> None:
         if self._dialer_task:
             self._dialer_task.cancel()
         for session in list(self.sessions.values()):
             await session.stop("server shutdown")
+        if self.zadarma is not None:
+            await self.zadarma.stop()
+        if self.whatsapp is not None:
+            await self.whatsapp.stop()
         if self.twilio:
             await self.twilio.aclose()
+
+    def start_line_session(self, call: dict[str, Any], transport: Any, direction: str) -> Any:
+        """Voice session for a carrier line (Zadarma SIP / WhatsApp) that delivers audio through `transport`."""
+        from .local_voice import create_voice_session
+
+        lead = self.db.get_lead(call["lead_id"]) if call.get("lead_id") else None
+        campaign = self.db.get_campaign(call["campaign_id"]) if call.get("campaign_id") else None
+        session = create_voice_session(
+            settings=self.settings, db=self.db, call=call, lead=lead, campaign=campaign,
+            transport=transport, direction=direction, on_finished=self.on_session_finished,
+        )
+        transport.session = session
+        self.sessions[call["id"]] = session
+        return session
 
     def spawn(self, coro: Any) -> None:
         task = asyncio.create_task(coro)
@@ -80,7 +117,7 @@ class CallManager:
             await asyncio.sleep(5)
 
     async def dial_tick(self) -> int:
-        if self.twilio is None or not self.settings.voice_available:
+        if not self.settings.phone_line or not self.settings.voice_available:
             return 0
         agent = get_agent_settings(self.db)
         loop = asyncio.get_running_loop()
@@ -124,8 +161,8 @@ class CallManager:
         agent: dict[str, Any] | None = None,
         preflight: CheckResult | None = None,
     ) -> dict[str, Any]:
-        if self.twilio is None:
-            raise CallError("Twilio is not configured (see .env)")
+        if not self.settings.phone_line:
+            raise CallError("No phone line configured: set ZADARMA_SIP_LOGIN/ZADARMA_SIP_PASSWORD or Twilio in .env")
         if not self.settings.voice_available:
             raise CallError("No voice backend (set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY)")
         agent = agent or get_agent_settings(self.db)
@@ -145,8 +182,8 @@ class CallManager:
             return await self._dial(call, lead["phone"], agent)
 
     async def place_test_call(self, phone: str) -> dict[str, Any]:
-        if self.twilio is None:
-            raise CallError("Twilio is not configured (see .env)")
+        if not self.settings.phone_line:
+            raise CallError("No phone line configured: set ZADARMA_SIP_LOGIN/ZADARMA_SIP_PASSWORD or Twilio in .env")
         if not self.settings.voice_available:
             raise CallError("No voice backend (set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY)")
         agent = get_agent_settings(self.db)
@@ -156,6 +193,16 @@ class CallManager:
         return await self._dial(call, phone, agent)
 
     async def _dial(self, call: dict[str, Any], phone: str, agent: dict[str, Any]) -> dict[str, Any]:
+        if self.settings.phone_line == "zadarma":
+            try:
+                placed = await self.zadarma.dial(call, phone)
+            except Exception as exc:  # noqa: BLE001
+                self.db.update_call(call["id"], status="failed", error=str(exc)[:500], ended_at=now_iso())
+                if call.get("lead_id"):
+                    self._finalize_lead(self.db.get_call(call["id"]))  # type: ignore[arg-type]
+                raise CallError(str(exc)) from exc
+            log.info("call %s placed to %s via Zadarma", call["id"], phone)
+            return placed
         assert self.twilio is not None
         amd = "DetectMessageEnd" if agent["voicemail_action"] == "leave_message" else "Enable"
         try:
@@ -168,7 +215,29 @@ class CallManager:
         log.info("call %s placed to %s (sid %s)", call["id"], phone, sid)
         return self.db.update_call(call["id"], twilio_sid=sid, status="initiated")  # type: ignore[return-value]
 
+    async def place_whatsapp_call(self, phone: str, lead: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.whatsapp is None:
+            raise CallError("WhatsApp calling is not configured (WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN)")
+        if not self.settings.voice_available:
+            raise CallError("No voice backend (set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY)")
+        if lead is not None:
+            result = check_lead(self.db, lead, get_agent_settings(self.db))
+            if not result.ok:
+                raise CallError(f"cannot call now: {result.reason}")
+        call = self.db.create_call(
+            phone=phone, lead_id=lead["id"] if lead else None,
+            campaign_id=lead.get("campaign_id") if lead else None, kind="whatsapp",
+        )
+        try:
+            return await self.whatsapp.dial(call, phone)
+        except Exception as exc:  # noqa: BLE001
+            self.db.update_call(call["id"], status="failed", error=str(exc)[:500], ended_at=now_iso())
+            raise CallError(str(exc)) from exc
+
     async def hangup(self, call_id: int) -> None:
+        for line in (self.zadarma, self.whatsapp):
+            if line is not None and await line.hangup(call_id):
+                return
         session = self.sessions.get(call_id)
         if session is not None:
             session.request_hangup("operator")

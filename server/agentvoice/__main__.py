@@ -74,8 +74,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"  Voice: OpenAI Realtime ({settings.realtime_model})")
     else:
         print("  WARNING: no voice backend (set GEMINI_API_KEY / OPENAI_API_KEY, or start Ollama).")
-    if not settings.twilio_configured:
-        print("  Twilio is not configured; phone calls are disabled. Talk/practice still works.")
+    if settings.phone_line == "zadarma":
+        print(f"  Phone line: Zadarma SIP ({settings.zadarma_sip_login})")
+    elif settings.phone_line == "twilio":
+        print(f"  Phone line: Twilio ({settings.twilio_from_number})")
+    else:
+        print("  No phone line configured (Zadarma or Twilio); Talk/practice still works.")
+    if settings.whatsapp_configured:
+        print(f"  WhatsApp calling: webhook at {settings.public_base_url or '<PUBLIC_BASE_URL>'}/whatsapp/webhook")
     print()
     common = dict(host=host, log_level=args.log_level, proxy_headers=True, forwarded_allow_ips="*")
     servers = [uvicorn.Server(uvicorn.Config(app, port=port, **common))]
