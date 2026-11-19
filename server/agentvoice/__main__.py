@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -30,26 +32,70 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
     app = create_app(settings)
     token = app.state.admin_token
-    print(f"\n  AgentVoice dashboard: http://localhost:{args.port or settings.port}/")
+    host = args.host or settings.host
+    port = args.port or settings.port
+    https_port = settings.https_port if args.https_port is None else args.https_port
+    remote_ok = host not in ("127.0.0.1", "localhost", "::1")
+
+    ssl_files: tuple[str, str] | None = None
+    if https_port:
+        if settings.ssl_certfile and settings.ssl_keyfile:
+            ssl_files = (settings.ssl_certfile, settings.ssl_keyfile)
+        else:
+            from .tls import ensure_self_signed_cert
+
+            try:
+                cert, key = ensure_self_signed_cert(settings.db_path.parent / "tls")
+                ssl_files = (str(cert), str(key))
+            except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+                print(f"  HTTPS disabled: {exc}")
+
+    print(f"\n  AgentVoice dashboard: http://localhost:{port}/")
+    if remote_ok:
+        from .tls import local_ips
+
+        for ip in local_ips():
+            print(f"  Android app / LAN:    http://{ip}:{port}")
+            if ssl_files:
+                print(f"  Phone browser (mic):  https://{ip}:{https_port}/#token={token}")
+        if ssl_files and not (settings.ssl_certfile and settings.ssl_keyfile):
+            print("  (self-signed certificate: tap Advanced > Proceed on the phone the first time)")
+    else:
+        print(f"  Listening on {host} only; use --host 0.0.0.0 to reach it from a phone.")
     if not settings.admin_token:
         print(f"  API token (generated, also in `agentvoice token`): {token}")
-    if settings.uses_ollama:
+    if settings.uses_gemini:
+        print(f"  Voice: Gemini ({settings.gemini_model}) + Whisper/Piper")
+    elif settings.uses_openai_chat:
+        print(f"  Voice: OpenAI chat ({settings.summary_model}) + Whisper/Piper")
+    elif settings.uses_ollama:
         print(f"  Voice: local Ollama ({settings.ollama_model} at {settings.ollama_base_url})")
-    elif settings.openai_configured:
+    elif settings.uses_openai_realtime:
         print(f"  Voice: OpenAI Realtime ({settings.realtime_model})")
     else:
-        print("  WARNING: no voice backend (start Ollama or set OPENAI_API_KEY).")
+        print("  WARNING: no voice backend (set GEMINI_API_KEY / OPENAI_API_KEY, or start Ollama).")
     if not settings.twilio_configured:
         print("  Twilio is not configured; phone calls are disabled. Talk/practice still works.")
     print()
-    uvicorn.run(
-        app,
-        host=args.host or settings.host,
-        port=args.port or settings.port,
-        log_level=args.log_level,
-        proxy_headers=True,
-        forwarded_allow_ips="*",
-    )
+    common = dict(host=host, log_level=args.log_level, proxy_headers=True, forwarded_allow_ips="*")
+    servers = [uvicorn.Server(uvicorn.Config(app, port=port, **common))]
+    if ssl_files:
+        # lifespan off: the dialer/call manager must only start once per process.
+        servers.append(uvicorn.Server(uvicorn.Config(
+            app, port=https_port, ssl_certfile=ssl_files[0], ssl_keyfile=ssl_files[1], lifespan="off", **common,
+        )))
+
+    async def serve_all() -> None:
+        tasks = [asyncio.create_task(s.serve()) for s in servers]
+        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for s in servers:
+            s.should_exit = True
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        asyncio.run(serve_all())
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -122,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("serve", help="run the server, dialer and dashboard")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
+    p.add_argument("--https-port", type=int, help="HTTPS port for phone browsers (default 8443, 0 = off)")
     p.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     p.set_defaults(func=cmd_serve)
 

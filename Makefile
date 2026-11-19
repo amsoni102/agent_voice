@@ -2,6 +2,7 @@
 #
 #   make install          create .venv and install the server
 #   make run              run the server + dashboard on http://localhost:8080
+#   make stop             stop the server (ports from .env, plus any leftover agentvoice)
 #   make token            print the API token for the dashboard / Android app
 #   make test             run the server test suite
 #   make install-service  run in the background via a systemd user service (starts on login)
@@ -13,8 +14,22 @@ PYTHON ?= python3
 VENV := $(CURDIR)/.venv
 BIN := $(VENV)/bin
 ENV_FILE := $(CURDIR)/.env
+# Defaults match .env.example; overridden below when .env exists.
+PORT ?= 8080
+HTTPS_PORT ?= 8443
 
-.PHONY: install run token test install-service uninstall-service install-desktop compile_apk release_apk clean
+.PHONY: install run stop token test install-service uninstall-service install-desktop compile_apk release_apk clean
+
+ifneq (,$(wildcard $(ENV_FILE)))
+  PORT := $(shell awk -F= '/^PORT=/{gsub(/\r/,""); print $$2; exit}' $(ENV_FILE))
+  HTTPS_PORT := $(shell awk -F= '/^HTTPS_PORT=/{gsub(/\r/,""); print $$2; exit}' $(ENV_FILE))
+  ifeq ($(PORT),)
+    PORT := 8080
+  endif
+  ifeq ($(HTTPS_PORT),)
+    HTTPS_PORT := 8443
+  endif
+endif
 
 $(BIN)/agentvoice: server/pyproject.toml
 	$(PYTHON) -m venv $(VENV)
@@ -32,6 +47,23 @@ $(ENV_FILE):
 
 run: install
 	$(BIN)/agentvoice --env $(ENV_FILE) serve
+
+stop:
+	@# Stop systemd user service if this machine uses it.
+	@-systemctl --user stop agentvoice.service 2>/dev/null || true
+	@# Free HTTP/HTTPS listeners (make run / background leftovers).
+	@-fuser -k $(PORT)/tcp >/dev/null 2>&1 || true
+	@if [ -n "$(HTTPS_PORT)" ] && [ "$(HTTPS_PORT)" != "0" ]; then \
+		fuser -k $(HTTPS_PORT)/tcp >/dev/null 2>&1 || true; \
+	fi
+	@-pkill -f 'agentvoice .*serve' 2>/dev/null || true
+	@sleep 0.3
+	@if ss -ltn 2>/dev/null | grep -qE ":$(PORT)\s|:$(HTTPS_PORT)\s"; then \
+		echo "Something is still listening on $(PORT)/$(HTTPS_PORT)."; \
+		ss -ltnp 2>/dev/null | grep -E ":$(PORT)\s|:$(HTTPS_PORT)\s" || true; \
+		exit 1; \
+	fi
+	@echo "AgentVoice stopped (ports $(PORT) / $(HTTPS_PORT))."
 
 token: install
 	@$(BIN)/agentvoice --env $(ENV_FILE) token

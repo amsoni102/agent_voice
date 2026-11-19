@@ -39,7 +39,7 @@ def test_status_reports_ollama_when_openai_key_missing(make_settings, db):
         body = client.get("/api/status", headers=AUTH).json()
         assert body["voice_backend"] == "ollama"
         assert body["voice_available"] is True
-        assert body["ollama_model"] == "llama3.2:latest"
+        assert body["ollama_model"] == "llama3.2:1b"
         assert body["openai_configured"] is False
         assert body["twilio_configured"] is False
 

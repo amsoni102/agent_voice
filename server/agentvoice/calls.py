@@ -14,6 +14,7 @@ from .agent_settings import get_agent_settings
 from .compliance import CheckResult, check_lead
 from .config import Settings
 from .db import Database, now_iso, parse_iso, to_iso, utcnow
+from .gemini_llm import GeminiClient
 from .ollama_llm import OllamaClient
 from .research import research_is_fresh, research_website
 from .twilio import TwilioClient, TwilioError
@@ -126,7 +127,7 @@ class CallManager:
         if self.twilio is None:
             raise CallError("Twilio is not configured (see .env)")
         if not self.settings.voice_available:
-            raise CallError("No voice backend (start Ollama or set OPENAI_API_KEY)")
+            raise CallError("No voice backend (set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY)")
         agent = agent or get_agent_settings(self.db)
         result = preflight or check_lead(self.db, lead, agent)
         if not result.ok:
@@ -147,7 +148,7 @@ class CallManager:
         if self.twilio is None:
             raise CallError("Twilio is not configured (see .env)")
         if not self.settings.voice_available:
-            raise CallError("No voice backend (start Ollama or set OPENAI_API_KEY)")
+            raise CallError("No voice backend (set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY)")
         agent = get_agent_settings(self.db)
         if not agent["test_phone_number"] or phone != agent["test_phone_number"]:
             raise CallError("test calls can only go to the configured test_phone_number")
@@ -291,6 +292,16 @@ class CallManager:
                     )
                     resp.raise_for_status()
                     data = json.loads(resp.json()["choices"][0]["message"]["content"])
+            elif self.settings.uses_gemini:
+                data = await GeminiClient(self.settings.gemini_api_key, self.settings.gemini_model).summarize_json(
+                    SUMMARY_PROMPT, text[-60_000:]
+                )
+            elif self.settings.uses_openai_chat:
+                from .openai_chat_llm import OpenAIChatClient
+
+                data = await OpenAIChatClient(self.settings.openai_api_key, self.settings.summary_model).summarize_json(
+                    SUMMARY_PROMPT, text[-60_000:]
+                )
             elif self.settings.uses_ollama:
                 data = await OllamaClient(self.settings.ollama_base_url, self.settings.ollama_model).summarize_json(
                     SUMMARY_PROMPT, text[-60_000:]

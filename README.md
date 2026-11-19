@@ -40,13 +40,19 @@ make run              # dashboard on http://localhost:8080
 make token            # API token for the dashboard and the Android app
 ```
 
-**Talk/practice is local by default.** It uses the Ollama already running on this machine
-(`llama3.2` at `http://127.0.0.1:11434`) plus Whisper (listen) and the Piper voice from
-the management assistant. No OpenAI key. Open the Android **Talk** tab (or Practice in the
-dashboard), tap Start, say “Hello?”.
+**Talk/practice** uses Whisper (listen) + Piper (speak) plus a chat model for the brain.
+Set `GEMINI_API_KEY` (Gemini Flash) or `OPENAI_API_KEY` with `VOICE_BACKEND=openai_chat`,
+or leave both empty to use local Ollama. In practice the agent opens first and asks about
+the prospect's website. Open the Android **Talk** tab (or Practice in the dashboard) and tap Start.
 
-Keep Ollama up: `ollama serve` (and `ollama pull llama3.2` once). Optional: set
-`OPENAI_API_KEY` later for cloud Realtime; `VOICE_BACKEND=auto` switches when that key is present.
+**Practice from a phone browser:** browsers only allow the microphone on HTTPS, so the server
+also listens on `https://<pc-ip>:8443` with a self-signed certificate (`HTTPS_PORT`). `make run`
+prints the exact link; accept the certificate warning once. The Android app keeps using
+`http://<pc-ip>:8080`.
+
+Keep Ollama up if you use the local backend: `ollama serve` (and `ollama pull llama3.2` once).
+`VOICE_BACKEND=auto` prefers Gemini, then OpenAI chat, then Ollama. Use `VOICE_BACKEND=openai`
+for OpenAI Realtime (full cloud voice).
 
 Other targets: `make test`, `make install-service` (runs in the background and starts on login),
 and `make install-desktop` (adds an "AgentVoice" launcher that starts the server and opens the dashboard).

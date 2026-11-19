@@ -133,11 +133,10 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         manager.start()
         log.info(
-            "AgentVoice %s ready. Twilio=%s voice=%s ollama=%s",
+            "AgentVoice %s ready. Twilio=%s voice=%s",
             __version__,
             settings.twilio_configured,
-            "ollama" if settings.uses_ollama else ("openai" if settings.openai_configured else "none"),
-            settings.ollama_model if settings.uses_ollama else "-",
+            settings.llm_label,
         )
         yield
         await manager.shutdown()
@@ -214,11 +213,21 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             "version": __version__,
             "twilio_configured": settings.twilio_configured,
             "openai_configured": settings.openai_configured,
-            "voice_backend": "ollama" if settings.uses_ollama else ("openai" if settings.openai_configured else "none"),
+            "gemini_configured": settings.gemini_configured,
+            "voice_backend": (
+                "gemini" if settings.uses_gemini
+                else "openai_chat" if settings.uses_openai_chat
+                else "ollama" if settings.uses_ollama
+                else "openai" if settings.uses_openai_realtime
+                else "none"
+            ),
             "ollama_model": settings.ollama_model if settings.uses_ollama else "",
+            "gemini_model": settings.gemini_model if settings.uses_gemini else "",
+            "llm": settings.llm_label,
             "voice_available": settings.voice_available,
             "dialer_enabled": settings.dialer_enabled,
             "public_base_url": settings.public_base_url,
+            "https_port": settings.https_port,
             "from_number": settings.twilio_from_number,
             "running_campaigns": [c["id"] for c in db.running_campaigns()],
             "today": db.stats(today),
@@ -244,7 +253,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     async def start_campaign(campaign_id: int) -> dict[str, Any]:
         campaign_or_404(campaign_id)
         if not settings.twilio_configured or not settings.voice_available:
-            raise HTTPException(409, "configure Twilio and a voice backend (Ollama or OpenAI) before starting a campaign")
+            raise HTTPException(409, "configure Twilio and a voice backend (Gemini, Ollama, or OpenAI) before starting a campaign")
         return db.update_campaign(campaign_id, status="running")  # type: ignore[return-value]
 
     @app.post("/api/campaigns/{campaign_id}/pause", dependencies=auth)
@@ -559,7 +568,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             return
         await ws.accept()
         if not settings.voice_available:
-            await ws.send_json({"type": "error", "message": "No voice backend: start Ollama or set OPENAI_API_KEY"})
+            await ws.send_json({"type": "error", "message": "No voice backend: set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY"})
             await ws.close()
             return
         lead = db.get_lead(lead_id) if lead_id else None

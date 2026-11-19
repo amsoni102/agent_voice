@@ -45,11 +45,17 @@ class Settings:
     db_path: Path
     host: str
     port: int
+    https_port: int
+    ssl_certfile: str
+    ssl_keyfile: str
     validate_twilio_signature: bool
     dialer_enabled: bool
     voice_backend: str
     ollama_base_url: str
     ollama_model: str
+    ollama_tools: bool
+    gemini_api_key: str
+    gemini_model: str
     piper_bin: str
     piper_model: str
     whisper_model: str
@@ -59,17 +65,68 @@ class Settings:
         return bool(self.openai_api_key)
 
     @property
+    def gemini_configured(self) -> bool:
+        return bool(self.gemini_api_key)
+
+    @property
+    def uses_openai_realtime(self) -> bool:
+        backend = (self.voice_backend or "auto").strip().lower()
+        if backend == "openai":
+            return self.openai_configured
+        if backend in {"gemini", "ollama", "openai_chat"}:
+            return False
+        # auto never picks Realtime — Talk/practice uses chat/local unless forced.
+        return False
+
+    @property
+    def uses_gemini(self) -> bool:
+        backend = (self.voice_backend or "auto").strip().lower()
+        if backend == "gemini":
+            return self.gemini_configured
+        if backend in {"openai", "ollama", "openai_chat"}:
+            return False
+        # auto: Gemini Flash first when a key is set.
+        return self.gemini_configured
+
+    @property
+    def uses_openai_chat(self) -> bool:
+        backend = (self.voice_backend or "auto").strip().lower()
+        if backend == "openai_chat":
+            return self.openai_configured
+        if backend in {"openai", "ollama", "gemini"}:
+            return False
+        # auto: OpenAI chat if no Gemini key.
+        return self.openai_configured and not self.gemini_configured
+
+    @property
     def uses_ollama(self) -> bool:
         backend = (self.voice_backend or "auto").strip().lower()
         if backend == "ollama":
             return True
-        if backend == "openai":
+        if backend in {"openai", "gemini", "openai_chat"}:
             return False
-        return not self.openai_configured
+        return not self.openai_configured and not self.gemini_configured
+
+    @property
+    def uses_local_voice(self) -> bool:
+        """Whisper STT + Piper TTS path (Ollama / Gemini / OpenAI chat for the brain)."""
+        return self.uses_ollama or self.uses_gemini or self.uses_openai_chat
 
     @property
     def voice_available(self) -> bool:
-        return self.openai_configured or self.uses_ollama
+        return self.uses_openai_realtime or self.uses_local_voice
+
+    @property
+    def llm_label(self) -> str:
+        if self.uses_gemini:
+            return f"gemini:{self.gemini_model}"
+        if self.uses_openai_chat:
+            return f"openai_chat:{self.summary_model}"
+        if self.uses_ollama:
+            return f"ollama:{self.ollama_model}"
+        if self.uses_openai_realtime:
+            return f"openai:{self.realtime_model}"
+        return "none"
 
     @property
     def twilio_configured(self) -> bool:
@@ -111,11 +168,20 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         db_path=db_path,
         host=os.environ.get("HOST", "0.0.0.0"),
         port=int(os.environ.get("PORT", "8080")),
+        # Phone browsers only allow the microphone over HTTPS; 0 disables the HTTPS listener.
+        https_port=int(os.environ.get("HTTPS_PORT", "8443") or 0),
+        ssl_certfile=os.environ.get("SSL_CERTFILE", ""),
+        ssl_keyfile=os.environ.get("SSL_KEYFILE", ""),
         validate_twilio_signature=_bool("TWILIO_VALIDATE_SIGNATURE", True),
         dialer_enabled=_bool("DIALER_ENABLED", True),
         voice_backend=os.environ.get("VOICE_BACKEND", "auto").strip() or "auto",
         ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
-        ollama_model=os.environ.get("OLLAMA_MODEL", "llama3.2:latest"),
+        # 1B is much faster on CPU for Talk/practice; override with llama3.2:latest if you prefer.
+        ollama_model=os.environ.get("OLLAMA_MODEL", "llama3.2:1b"),
+        # Small local models garble tool calls; by default the call flow is rule-driven instead.
+        ollama_tools=_bool("OLLAMA_TOOLS", False),
+        gemini_api_key=os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", ""),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
         piper_bin=os.environ.get("PIPER_BIN", str(_DEFAULT_PIPER_DIR / "piper" / "piper")),
         piper_model=os.environ.get("PIPER_MODEL", str(_DEFAULT_PIPER_DIR / "en_US-ryan-high.onnx")),
         whisper_model=os.environ.get("WHISPER_MODEL", "tiny.en"),

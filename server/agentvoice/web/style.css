@@ -89,4 +89,21 @@ tr.click:hover td { background: var(--panel-2); }
 .list-editor .item { display: flex; gap: 8px; margin-bottom: 6px; }
 .list-editor .item input, .list-editor .item textarea { flex: 1; }
 .pager { margin-top: 12px; }
-@media (max-width: 800px) { .sidebar { display: none; } main { padding: 16px; } }
+.card.warn { border-color: var(--warn); }
+.card.warn a { color: var(--warn); word-break: break-all; }
+@media (max-width: 800px) {
+  #app { flex-direction: column; }
+  .sidebar { width: 100%; height: auto; flex-direction: row; align-items: center; border-right: none; border-bottom: 1px solid var(--border); z-index: 5; }
+  .brand { padding: 12px 14px; font-size: 16px; }
+  nav { display: flex; flex: 1; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  nav a { white-space: nowrap; padding: 14px 12px; border-left: none; border-bottom: 3px solid transparent; }
+  nav a.active { border-left-color: transparent; border-bottom-color: var(--accent); }
+  .sidebar-foot { margin: 0; padding: 0 12px; }
+  #health { display: none; }
+  main { padding: 14px; max-width: 100%; }
+  .card { padding: 14px; overflow-x: auto; }
+  input, select, textarea { font-size: 16px; }
+  .msg { max-width: 92%; }
+  .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+  .login-card { width: min(360px, calc(100vw - 32px)); }
+}

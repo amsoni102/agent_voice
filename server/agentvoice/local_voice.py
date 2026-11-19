@@ -1,4 +1,4 @@
-"""Practice/call voice using local Ollama + Whisper + Piper (no OpenAI Realtime)."""
+"""Practice/call voice using Whisper + Piper + Ollama or Gemini (no OpenAI Realtime)."""
 
 from __future__ import annotations
 
@@ -6,22 +6,51 @@ import asyncio
 import base64
 import json
 import logging
-from typing import Any, Awaitable, Callable
+import re
+from typing import Any, Awaitable, Callable, Protocol
 
 from .agent_settings import get_agent_settings
 from .audio_util import EnergyVad, pcm16_chunk_b64, rms_s16, split_sentences
 from .config import Settings
 from .db import Database
-from .ollama_llm import OllamaClient
-from .playbook import build_instructions, get_playbook
+from .gemini_llm import GeminiClient
+from .ollama_llm import OllamaClient, speakable
+from .openai_chat_llm import OpenAIChatClient
+from .playbook import build_compact_instructions, get_playbook
 from .realtime import Transport
 from .stt import transcribe_pcm16
-from .tools import ToolRunner
+from .tools import ToolRunner, open_slots, spoken_time
 from .tts import speak_pcm24k
+
+
+class _ChatLLM(Protocol):
+    async def warmup(self) -> None: ...
+    async def chat(
+        self, messages: list[dict[str, Any]], *, tools: bool = True
+    ) -> tuple[str, list[dict[str, Any]]]: ...
+    def chat_stream(self, messages: list[dict[str, Any]]) -> Any: ...
 
 log = logging.getLogger("agentvoice.local")
 
 SAMPLE_RATE = 24000
+
+_DNC = re.compile(r"\b(don'?t|do not|never|stop) (ever )?call|remove me|take me off|put me on .*do.not.call|do.not.call list")
+_BYE = re.compile(r"\b(good ?bye|bye|gotta go|got to go|have to go|hang up|talk later)\b")
+_DECLINE = re.compile(
+    r"\b(not interested|no,? thanks?|no,? thank you|not right now|not now|don'?t need|we'?re good|we are good|no need|pass)\b"
+)
+_SENTENCE_END = re.compile(r"[.!?](?=\s)")
+
+
+def classify_intent(text: str) -> str | None:
+    t = (text or "").lower()
+    if _DNC.search(t):
+        return "dnc"
+    if _BYE.search(t):
+        return "bye"
+    if _DECLINE.search(t):
+        return "decline"
+    return None
 
 
 class LocalVoiceSession:
@@ -36,7 +65,7 @@ class LocalVoiceSession:
         transport: Transport,
         direction: str,
         on_finished: Callable[[int], Awaitable[None]] | None = None,
-        llm: OllamaClient | None = None,
+        llm: _ChatLLM | None = None,
         transcribe: Any = None,
         speak: Any = None,
     ):
@@ -60,16 +89,27 @@ class LocalVoiceSession:
             playbook=self.playbook,
             dry_run=direction == "practice",
         )
-        self.llm = llm or OllamaClient(settings.ollama_base_url, settings.ollama_model)
+        self.llm = llm or make_llm(settings)
         self._transcribe = transcribe or transcribe_pcm16
         self._speak = speak or speak_pcm24k
-        instructions = build_instructions(self.playbook, self.agent_settings, lead, campaign, direction=direction)
-        extra = (
-            "\n\nYou are on a live voice call. Always speak out loud in one or two short sentences "
-            "before calling any tool. Do not use markdown, bullets, or URLs. "
-            "Only call a tool when the prospect asked for times, a booking, a callback, DNC, or to hang up."
+        # Gemini (and small Ollama) stay tool-free by default; Ollama tools only when explicitly on.
+        self.use_tools = bool(settings.ollama_tools and settings.uses_ollama)
+        self.declines = 0
+        offer_times: list[str] = []
+        if not self.use_tools:
+            try:
+                slots = open_slots(
+                    db, self.agent_settings, self.tools.prospect_tz,
+                    meeting_minutes=int(self.playbook.get("meeting_length_minutes", 20)), limit=2,
+                )
+                offer_times = [spoken_time(s) for s in slots]
+            except Exception:  # noqa: BLE001
+                log.exception("call %s: could not compute open slots", self.call_id)
+        instructions = build_compact_instructions(
+            self.playbook, self.agent_settings, lead, campaign, direction=direction,
+            tools=self.use_tools, offer_times=offer_times,
         )
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": instructions + extra}]
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": instructions}]
         self.vad = EnergyVad(sample_rate=SAMPLE_RATE)
         self._tasks: list[asyncio.Task[Any]] = []
         self._turn_task: asyncio.Task[Any] | None = None
@@ -81,13 +121,32 @@ class LocalVoiceSession:
         self._speaking = False
 
     async def start(self) -> None:
-        self._tasks.append(asyncio.create_task(self.llm.warmup(), name=f"ollama-warm-{self.call_id}"))
+        self._tasks.append(asyncio.create_task(self.llm.warmup(), name=f"llm-warm-{self.call_id}"))
         self._tasks.append(asyncio.create_task(self._max_duration_guard(), name=f"local-guard-{self.call_id}"))
         if self.direction == "inbound":
             await self._respond("The prospect just called in. Greet them.")
+        elif self.direction == "practice":
+            # Practice: agent opens first (website discovery), don't wait for the user.
+            self._tasks.append(asyncio.create_task(self._practice_kickoff(), name=f"local-kick-{self.call_id}"))
         else:
             self._tasks.append(asyncio.create_task(self._kickoff_if_silent(), name=f"local-kick-{self.call_id}"))
-        log.info("call %s: local Ollama session started (%s / %s)", self.call_id, self.direction, self.settings.ollama_model)
+        log.info(
+            "call %s: local voice session started (%s / %s)",
+            self.call_id, self.direction, self.settings.llm_label,
+        )
+
+    async def _practice_kickoff(self) -> None:
+        # Short beat so the WebSocket/mic is ready, then the agent starts talking.
+        await asyncio.sleep(0.4)
+        if self.caller_spoke or self.agent_started or self._finished:
+            return
+        business = (self.lead or {}).get("business_name") or "your business"
+        await self._respond(
+            "The prospect just answered. YOU start the conversation: introduce yourself with name "
+            f"and company, give the AI disclosure, ask if they have a quick minute about {business}, "
+            "then ask whether they have a website and how it's working for them. Keep it to 2 short "
+            "spoken sentences and end on that website question."
+        )
 
     async def stop(self, reason: str = "") -> None:
         if self._finished:
@@ -202,6 +261,9 @@ class LocalVoiceSession:
     async def _respond(self, system_nudge: str = "", user_text: str = "") -> None:
         if self._finished:
             return
+        if not self.use_tools:
+            await self._respond_lite(system_nudge, user_text)
+            return
         if system_nudge:
             self.messages.append({"role": "system", "content": system_nudge})
         if user_text:
@@ -211,7 +273,9 @@ class LocalVoiceSession:
             for _ in range(4):
                 if self._finished:
                     return
-                text, calls = await self.llm.chat(self.messages)
+                # Skip tools on pure talk turns — tool schemas make CPU Ollama ~2x slower.
+                use_tools = self._wants_tools(user_text or system_nudge)
+                text, calls = await self.llm.chat(self.messages, tools=use_tools)
                 if calls:
                     assistant_msg: dict[str, Any] = {"role": "assistant", "content": text}
                     ollama_calls = []
@@ -264,11 +328,127 @@ class LocalVoiceSession:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.exception("ollama turn failed")
-            await self.transport.send_event({"type": "error", "message": f"Ollama error: {exc}"})
+            log.exception("llm turn failed")
+            await self.transport.send_event({"type": "error", "message": f"LLM error: {exc}"})
+
+    async def _respond_lite(self, system_nudge: str = "", user_text: str = "") -> None:
+        """Tool-free turn: rules decide call control, the model only talks (streamed)."""
+        if user_text:
+            self.messages.append({"role": "user", "content": user_text})
+        elif not any(m.get("role") == "user" for m in self.messages):
+            # Small models need a user turn to answer; the line opening sounds like a pick-up.
+            self.messages.append({"role": "user", "content": "Hello?"})
+        self.agent_started = True
+
+        end_reason = ""
+        intent = classify_intent(user_text) if user_text and self._agent_has_spoken() else None
+        if intent == "dnc":
+            result = await self.tools.run("add_to_do_not_call", json.dumps({"reason": "asked on call"}))
+            await self.transport.send_event({"type": "tool", "name": "add_to_do_not_call", "result": result})
+            nudge, end_reason = "They asked not to be called again. Apologize in one sentence, confirm they are removed, and say goodbye.", "do not call"
+        elif intent == "bye":
+            nudge, end_reason = "They are ending the call. Thank them and say goodbye in one short sentence.", "prospect said goodbye"
+        elif intent == "decline":
+            self.declines += 1
+            if self.declines >= 2:
+                nudge, end_reason = "They declined again. Thank them for their time and say goodbye in one short sentence.", "not interested"
+            else:
+                nudge = "They declined. Acknowledge it, give one short reason it could help them, and ask if a quick callback another day would work."
+        else:
+            nudge = ""
+        nudge = " ".join(x for x in (system_nudge, nudge) if x)
+        # The turn instruction rides on the latest user message for this turn only: as a separate
+        # system message a 1B model reads it aloud, and editing the system prompt defeats
+        # Ollama's prompt cache.
+        turn_messages = list(self.messages)
+        if nudge:
+            last = turn_messages[-1]
+            turn_messages[-1] = {**last, "content": f"{last['content']}\n\n(Instruction for your reply, do not read aloud: {nudge})"}
+
+        try:
+            text = await self._stream_and_say(turn_messages)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("llm turn failed")
+            await self.transport.send_event({"type": "error", "message": f"LLM error: {exc}"})
+            return
+        if not text:
+            text = "Sorry, could you say that again?" if not end_reason else "Thanks for your time. Goodbye."
+            await self._say(text)
+        self.messages.append({"role": "assistant", "content": text})
+        self.db.add_transcript(self.call_id, "agent", text)
+        await self.transport.send_event({"type": "transcript", "role": "agent", "text": text})
+
+        if end_reason:
+            if end_reason == "not interested":
+                await self.tools.run("set_outcome", json.dumps({"outcome": "not_interested", "notes": "declined twice"}))
+            self.request_hangup(end_reason)
+            await self.transport.mark("hangup")
+
+    async def _stream_and_say(self, messages: list[dict[str, Any]]) -> str:
+        """Speak each sentence as soon as the model finishes it; returns the full spoken text."""
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        speaker = asyncio.create_task(self._speak_queue(queue))
+        spoken: list[str] = []
+        pending = ""
+
+        def flush(piece: str) -> None:
+            clean = speakable(piece)
+            if clean:
+                spoken.append(clean)
+                queue.put_nowait(clean)
+
+        try:
+            async for chunk in self.llm.chat_stream(messages):
+                pending += chunk
+                last = None
+                for m in _SENTENCE_END.finditer(pending):
+                    last = m
+                if last is not None:
+                    flush(pending[: last.end()])
+                    pending = pending[last.end():]
+            tail = pending.strip()
+            # A tail without punctuation was cut off by num_predict; drop it if we already said something.
+            if tail and (tail[-1] in ".!?" or not spoken):
+                flush(tail)
+            queue.put_nowait(None)
+            await speaker
+        except BaseException:
+            speaker.cancel()
+            raise
+        return " ".join(spoken)
+
+    async def _speak_queue(self, queue: asyncio.Queue[str | None]) -> None:
+        self._speaking = True
+        try:
+            while (sentence := await queue.get()) is not None:
+                if self._finished:
+                    return
+                pcm = await self._speak(sentence, self.settings.piper_bin, self.settings.piper_model)
+                for chunk in pcm16_chunk_b64(pcm or b""):
+                    if self._finished:
+                        return
+                    await self.transport.send_audio(base64.b64encode(chunk).decode())
+            await self.transport.mark(f"audio-{self.call_id}")
+        finally:
+            self._speaking = False
 
     def _agent_has_spoken(self) -> bool:
         return any(m.get("role") == "assistant" and (m.get("content") or "").strip() for m in self.messages)
+
+    def _wants_tools(self, latest: str) -> bool:
+        text = (latest or "").lower()
+        keys = (
+            "book", "meeting", "schedule", "available", "availability", "callback",
+            "call back", "email", "don't call", "do not call", "stop calling",
+            "goodbye", "hang up", "not interested", "transfer", "human", "person",
+        )
+        if any(k in text for k in keys):
+            return True
+        # After a few exchanges, allow tools so booking can happen without magic words.
+        user_turns = sum(1 for m in self.messages if m.get("role") == "user")
+        return user_turns >= 3
 
     async def _say(self, text: str) -> None:
         self._speaking = True
@@ -288,6 +468,14 @@ class LocalVoiceSession:
             self._speaking = False
 
 
+def make_llm(settings: Settings) -> _ChatLLM:
+    if settings.uses_gemini:
+        return GeminiClient(settings.gemini_api_key, settings.gemini_model)
+    if settings.uses_openai_chat:
+        return OpenAIChatClient(settings.openai_api_key, settings.summary_model)
+    return OllamaClient(settings.ollama_base_url, settings.ollama_model)
+
+
 def create_voice_session(
     *,
     settings: Settings,
@@ -301,7 +489,7 @@ def create_voice_session(
 ) -> LocalVoiceSession | Any:
     from .realtime import VoiceSession
 
-    if settings.uses_ollama:
+    if settings.uses_local_voice:
         return LocalVoiceSession(
             settings=settings,
             db=db,

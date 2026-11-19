@@ -341,3 +341,75 @@ def build_instructions(
         f"{_research_notes(lead.get('research') or {})}"
     )
     return "\n\n".join(parts)
+
+
+def build_compact_instructions(
+    playbook: dict[str, Any],
+    agent_settings: dict[str, Any],
+    lead: dict[str, Any] | None,
+    campaign: dict[str, Any] | None = None,
+    direction: str = "outbound",
+    now_utc: datetime | None = None,
+    tools: bool = True,
+    offer_times: list[str] | None = None,
+) -> str:
+    """Short prompt for local Ollama — same persona, far fewer tokens (much faster on CPU)."""
+    now_utc = now_utc or utcnow()
+    pb = dict(playbook)
+    pb["disclosure"] = _fmt(pb["disclosure"], pb)
+    lead = lead or {}
+    tz_name = primary_timezone(lead) if lead.get("phone") else "America/New_York"
+    local_now = now_utc.astimezone(ZoneInfo(tz_name))
+    contact = lead.get("contact_name") or "the owner"
+    business = lead.get("business_name") or "their business"
+    campaign_note = (campaign or {}).get("extra_instructions", "").strip()
+    research = _research_notes(lead.get("research") or {})
+    if direction == "inbound":
+        open_line = "Inbound: they called you. Greet, disclose, help."
+    elif direction == "practice":
+        open_line = (
+            "Practice call: YOU start. Give a short outbound opening (name, company, AI disclosure),"
+            " ask if they have a minute, then ask about their website — do they have one,"
+            " how it's working, or what they'd change. One question at a time."
+        )
+    else:
+        open_line = "Outbound: wait for hello, then open."
+    if tools:
+        call_control = (
+            "Tools: only when needed (availability, book, callback, DNC, end_call)."
+            " Speak before any tool. Do not hang up on a greeting."
+        )
+    else:
+        times = " or ".join((offer_times or [])[:2])
+        call_control = (
+            (f"Open meeting times to offer: {times}. " if times else "")
+            + "When they pick a time, confirm it and ask for their name and email for the invite."
+            " If they say no, acknowledge it, give one short reason it could help, and ask about a"
+            " callback another day. If they still say no, thank them and say goodbye."
+            " Only ever output the words you speak."
+        )
+    return "\n".join(
+        [
+            f"You are {pb['agent_name']} from {pb['company_name']}"
+            f"{' (' + pb['company_location'] + ')' if pb.get('company_location') else ''}."
+            f" Goal: book {pb['meeting_goal']}.",
+            f'Disclosure (required in opening): "{pb["disclosure"]}"',
+            f"Offer: {pb['offer_summary']}",
+            "Voice rules: 1-2 short spoken sentences only. No markdown, bullets, or URLs."
+            " Sound human and brief. Ask one question, then stop. Never invent clients or prices.",
+            "If asked if you're AI/human: say you're an AI assistant for the company.",
+            "Flow: open with name+company+disclosure+permission → one discovery question →"
+            " light pitch tied to their pain → offer two meeting times → book name+email.",
+            f"Pricing only if asked: {pb['pricing_guidance']}",
+            f"This call: {open_line} Prospect local time {local_now:%a %b %d %I:%M %p} ({tz_name}).",
+            f"Prospect: {contact} at {business}."
+            + (f" Industry: {lead.get('industry')}." if lead.get("industry") else "")
+            + (f" City: {lead.get('city')}, {lead.get('state')}." if lead.get("city") else ""),
+            f"Hook notes (don't read aloud): {research}" if research and research != "(none)" else "",
+            f"Campaign note: {campaign_note}" if campaign_note else "",
+            call_control,
+            "No human transfer."
+            if not agent_settings.get("transfer_number")
+            else "Human transfer available via transfer_to_human if they ask.",
+        ]
+    ).strip()

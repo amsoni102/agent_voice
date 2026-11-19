@@ -31,7 +31,7 @@ class ModelsTest {
         val json = JSONObject(
             """
             {"version":"1.0.0","twilio_configured":false,"openai_configured":false,
-             "voice_backend":"ollama","ollama_model":"llama3.2:latest","voice_available":true,
+             "voice_backend":"ollama","ollama_model":"llama3.2:latest","gemini_model":"","voice_available":true,
              "from_number":"","running_campaigns":[],
              "today":{"dials":0,"conversations":0,"voicemails":0,"talk_minutes":0,"meetings_booked":0,"active_calls":0},
              "last_7_days":{"dials":0,"conversations":0,"voicemails":0,"talk_minutes":0,"meetings_booked":0,"active_calls":0}}

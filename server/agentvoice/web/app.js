@@ -121,7 +121,9 @@ Views.overview = async () => {
     ]);
     $("#health").textContent = `v${st.version} · ${st.running_campaigns.length} campaign(s) running`;
     const warn = [];
-    if (!st.voice_available) warn.push("No voice backend: start Ollama (llama3.2) or set OPENAI_API_KEY.");
+    if (!st.voice_available) warn.push("No voice backend: set GEMINI_API_KEY, start Ollama, or set OPENAI_API_KEY.");
+    else if (st.voice_backend === "gemini") warn.push("Voice is Gemini (" + (st.gemini_model || "flash") + ") + local Whisper/Piper. Practice agent opens first.");
+    else if (st.voice_backend === "openai_chat") warn.push("Voice is OpenAI chat (" + ((st.llm || "").split(":")[1] || "gpt-4o-mini") + ") + local Whisper/Piper. Practice agent opens first.");
     else if (st.voice_backend === "ollama") warn.push("Voice is local Ollama (" + (st.ollama_model || "llama3.2") + "). Free, a bit slower, fine for practice.");
     if (!st.twilio_configured) warn.push("Twilio is not configured in .env (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, PUBLIC_BASE_URL): phone calls are disabled. Practice mode still works.");
     const stat = (v, l) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`;
@@ -524,23 +526,51 @@ function floatToPcm16B64(f32) {
   return btoa(bin);
 }
 
+let httpsPort = 0;
+
+function micBlockedReason() {
+  if (navigator.mediaDevices?.getUserMedia && window.isSecureContext) return "";
+  if (!window.isSecureContext) {
+    return "This browser only allows the microphone on HTTPS pages. Open the secure link below (accept the certificate warning once).";
+  }
+  return "This browser does not support microphone capture. Try Chrome or Safari, or use the Android app's Talk tab.";
+}
+
+function secureUrl() {
+  if (!httpsPort) return "";
+  return `https://${location.hostname}:${httpsPort}/#token=${encodeURIComponent(token)}`;
+}
+
 const Practice = {
   ws: null, ctx: null, stream: null, node: null, src: null, sources: [], playhead: 0, leadId: null, micLevel: 0,
 
   async start() {
+    const blocked = micBlockedReason();
+    if (blocked) throw new Error(blocked);
     const p = new URLSearchParams({ token });
     if (this.leadId) p.set("lead_id", this.leadId);
     const proto = location.protocol === "https:" ? "wss" : "ws";
 
     // Create + resume AudioContext in the click gesture BEFORE awaiting getUserMedia,
     // otherwise Chrome leaves it suspended and neither mic nor speaker work.
-    this.ctx = new AudioContext({ sampleRate: 24000 });
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    try {
+      this.ctx = new Ctx({ sampleRate: 24000 });
+    } catch {
+      this.ctx = new Ctx();
+    }
     if (this.ctx.state === "suspended") await this.ctx.resume();
     const captureRate = this.ctx.sampleRate;
 
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-    });
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      });
+    } catch (err) {
+      if (err.name === "NotAllowedError") throw new Error("Microphone permission was denied. Allow it in the browser's site settings and try again.");
+      if (err.name === "NotFoundError") throw new Error("No microphone found on this device.");
+      throw err;
+    }
     if (this.ctx.state === "suspended") await this.ctx.resume();
 
     const worklet = `class Cap extends AudioWorkletProcessor{constructor(){super();this.buf=[];this.n=0}process(i){const c=i[0][0];if(c){this.buf.push(new Float32Array(c));this.n+=c.length;if(this.n>=960){const o=new Float32Array(this.n);let k=0;for(const b of this.buf){o.set(b,k);k+=b.length}this.port.postMessage(o,[o.buffer]);this.buf=[];this.n=0}}return true}}registerProcessor("cap",Cap)`;
@@ -581,7 +611,7 @@ const Practice = {
     } else if (m.type === "event" && m.event) {
       if (m.event.type === "transcript") {
         addPracticeLine(m.event.role, m.event.text);
-        if (m.event.role === "prospect") $("#pr-status").textContent = "Heard you — thinking (local Ollama can take 15–60s)…";
+        if (m.event.role === "prospect") $("#pr-status").textContent = "Heard you — thinking…";
         if (m.event.role === "agent") $("#pr-status").textContent = "Agent speaking…";
       } else if (m.event.type === "tool") {
         addPracticeLine("tool", `${m.event.name} → ${JSON.stringify(m.event.result)}`);
@@ -651,9 +681,18 @@ function renderPracticeState() {
 }
 
 Views.practice = async () => {
-  const leads = (await api("/api/leads?limit=200")).items;
-  main.innerHTML = `<h1>Practice mode</h1>
-    <div class="card"><p class="muted">Rehearse with the agent through your computer's microphone (use headphones). You play the business owner; the agent runs the exact same playbook it uses on real calls. Nothing is booked or saved to leads.</p>
+  const [leadPage, st] = await Promise.all([api("/api/leads?limit=200"), api("/api/status")]);
+  const leads = leadPage.items;
+  httpsPort = st.https_port || 0;
+  const blocked = micBlockedReason();
+  const link = secureUrl();
+  const micWarn = blocked
+    ? `<div class="card warn"><p>${esc(blocked)}</p>${!window.isSecureContext && link
+      ? `<p><a href="${esc(link)}">${esc(link.split("#")[0])}</a></p>`
+      : !window.isSecureContext ? `<p class="muted">Start the server with HTTPS enabled (HTTPS_PORT in .env).</p>` : ""}</div>`
+    : "";
+  main.innerHTML = `<h1>Practice mode</h1>${micWarn}
+    <div class="card"><p class="muted">Rehearse with the agent through this device's microphone (use headphones). You play the business owner; the agent runs the exact same playbook it uses on real calls. Nothing is booked or saved to leads.</p>
     <div class="row"><label style="margin:0">Pretend to be:</label><select id="pr-lead"><option value="">A generic small business</option>${leads.map((l) => `<option value="${l.id}" ${Practice.leadId == l.id ? "selected" : ""}>${esc(l.business_name || l.phone)}</option>`).join("")}</select>
     <div class="spacer"></div><button id="pr-toggle" class="primary">Start practice call</button></div>
     <div class="practice-orb"></div><p id="pr-status" class="muted" style="text-align:center"></p></div>
