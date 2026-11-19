@@ -32,11 +32,11 @@ class EnergyVad:
         self,
         sample_rate: int = 24000,
         frame_ms: int = 20,
-        start_rms: float = 450,
-        end_rms: float = 280,
-        start_frames: int = 4,
-        end_ms: int = 750,
-        min_speech_ms: int = 280,
+        start_rms: float = 350,
+        end_rms: float = 220,
+        start_frames: int = 3,
+        end_ms: int = 700,
+        min_speech_ms: int = 250,
         max_speech_ms: int = 15000,
     ):
         self.frame_bytes = int(sample_rate * 2 * frame_ms / 1000)

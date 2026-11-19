@@ -497,31 +497,79 @@ function objectionRow(o) {
 }
 
 // ---------------------------------------------------------------- practice
+function resampleFloat32(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+  const outLen = Math.max(1, Math.round(input.length * toRate / fromRate));
+  const out = new Float32Array(outLen);
+  const ratio = fromRate / toRate;
+  for (let i = 0; i < outLen; i++) {
+    const x = i * ratio;
+    const i0 = Math.floor(x);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    const t = x - i0;
+    out[i] = input[i0] * (1 - t) + input[i1] * t;
+  }
+  return out;
+}
+
+function floatToPcm16B64(f32) {
+  const pcm = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 0x7fff;
+  const bytes = new Uint8Array(pcm.buffer);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
 const Practice = {
-  ws: null, ctx: null, stream: null, node: null, src: null, sources: [], playhead: 0, leadId: null,
+  ws: null, ctx: null, stream: null, node: null, src: null, sources: [], playhead: 0, leadId: null, micLevel: 0,
 
   async start() {
     const p = new URLSearchParams({ token });
     if (this.leadId) p.set("lead_id", this.leadId);
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+
+    // Create + resume AudioContext in the click gesture BEFORE awaiting getUserMedia,
+    // otherwise Chrome leaves it suspended and neither mic nor speaker work.
     this.ctx = new AudioContext({ sampleRate: 24000 });
+    if (this.ctx.state === "suspended") await this.ctx.resume();
+    const captureRate = this.ctx.sampleRate;
+
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    if (this.ctx.state === "suspended") await this.ctx.resume();
+
     const worklet = `class Cap extends AudioWorkletProcessor{constructor(){super();this.buf=[];this.n=0}process(i){const c=i[0][0];if(c){this.buf.push(new Float32Array(c));this.n+=c.length;if(this.n>=960){const o=new Float32Array(this.n);let k=0;for(const b of this.buf){o.set(b,k);k+=b.length}this.port.postMessage(o,[o.buffer]);this.buf=[];this.n=0}}return true}}registerProcessor("cap",Cap)`;
     await this.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: "application/javascript" })));
     this.src = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, "cap");
+    // Keep the graph alive; mute local monitor so you don't hear yourself.
+    const mute = this.ctx.createGain();
+    mute.gain.value = 0;
     this.src.connect(this.node);
+    this.node.connect(mute);
+    mute.connect(this.ctx.destination);
+
     this.ws = new WebSocket(`${proto}://${location.host}/ws/practice?${p}`);
     this.node.port.onmessage = (e) => {
       if (this.ws?.readyState !== 1) return;
-      const f = e.data, pcm = new Int16Array(f.length);
-      for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 0x7fff;
-      let bin = ""; const bytes = new Uint8Array(pcm.buffer);
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      this.ws.send(JSON.stringify({ type: "audio", audio: btoa(bin) }));
+      const f = e.data;
+      let sum = 0;
+      for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+      this.micLevel = Math.sqrt(sum / Math.max(1, f.length));
+      const orb = $(".practice-orb");
+      if (orb) orb.classList.toggle("listening", this.micLevel > 0.01);
+      const pcm24 = resampleFloat32(f, captureRate, 24000);
+      this.ws.send(JSON.stringify({ type: "audio", audio: floatToPcm16B64(pcm24) }));
     };
     this.ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
     this.ws.onclose = () => { this.cleanup(); renderPracticeState(); };
+    this.ws.onerror = () => toast("Practice WebSocket failed", true);
+    $("#pr-status").textContent = `Mic ready (${captureRate} Hz → 24 kHz). Waiting for server…`;
   },
 
   onMessage(m) {
@@ -530,21 +578,50 @@ const Practice = {
     else if (m.type === "mark") {
       const wait = Math.max(0, (this.playhead - this.ctx.currentTime) * 1000);
       setTimeout(() => this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "mark", name: m.name })), wait);
-    } else if (m.type === "event" && m.event.type === "transcript") addPracticeLine(m.event.role, m.event.text);
-    else if (m.type === "event" && m.event.type === "tool") addPracticeLine("tool", `${m.event.name} → ${JSON.stringify(m.event.result)}`);
-    else if (m.type === "ready") { $("#pr-status").textContent = "Connected. Say \"Hello?\" like you're answering the phone."; }
-    else if (m.type === "error") toast(m.message, true);
-    else if (m.type === "hangup") $("#pr-status").textContent = "The agent ended the call.";
+    } else if (m.type === "event" && m.event) {
+      if (m.event.type === "transcript") {
+        addPracticeLine(m.event.role, m.event.text);
+        if (m.event.role === "prospect") $("#pr-status").textContent = "Heard you — thinking (local Ollama can take 15–60s)…";
+        if (m.event.role === "agent") $("#pr-status").textContent = "Agent speaking…";
+      } else if (m.event.type === "tool") {
+        addPracticeLine("tool", `${m.event.name} → ${JSON.stringify(m.event.result)}`);
+      } else if (m.event.type === "error") {
+        toast(m.event.message || "Practice error", true);
+        $("#pr-status").textContent = m.event.message || "Error";
+      }
+    } else if (m.type === "ready") {
+      $("#pr-status").textContent = "Live. Say \"Hello?\" clearly, then pause — use headphones.";
+    } else if (m.type === "error") {
+      toast(m.message, true);
+      $("#pr-status").textContent = m.message || "Error";
+    } else if (m.type === "hangup") {
+      $("#pr-status").textContent = "The agent ended the call.";
+    }
   },
 
-  play(b64) {
+  async play(b64) {
+    if (!this.ctx) return;
+    if (this.ctx.state === "suspended") await this.ctx.resume();
     const bin = atob(b64), n = bin.length / 2, f = new Float32Array(n);
-    for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 0x8000) v -= 0x10000; f[i] = v / 0x8000; }
-    const buf = this.ctx.createBuffer(1, n, 24000); buf.copyToChannel(f, 0);
-    const s = this.ctx.createBufferSource(); s.buffer = buf; s.connect(this.ctx.destination);
+    for (let i = 0; i < n; i++) {
+      let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      if (v >= 0x8000) v -= 0x10000;
+      f[i] = v / 0x8000;
+    }
+    // Always create the buffer at 24 kHz; the browser resamples to ctx.sampleRate.
+    const buf = this.ctx.createBuffer(1, n, 24000);
+    buf.copyToChannel(f, 0);
+    const s = this.ctx.createBufferSource();
+    s.buffer = buf;
+    s.connect(this.ctx.destination);
     this.playhead = Math.max(this.playhead, this.ctx.currentTime + 0.05);
-    s.start(this.playhead); this.playhead += buf.duration;
-    this.sources.push(s); s.onended = () => { this.sources = this.sources.filter((x) => x !== s); $(".practice-orb")?.classList.toggle("talking", this.sources.length > 0); };
+    s.start(this.playhead);
+    this.playhead += buf.duration;
+    this.sources.push(s);
+    s.onended = () => {
+      this.sources = this.sources.filter((x) => x !== s);
+      $(".practice-orb")?.classList.toggle("talking", this.sources.length > 0);
+    };
     $(".practice-orb")?.classList.add("talking");
   },
 
@@ -557,6 +634,7 @@ const Practice = {
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close().catch(() => {});
     this.ws = this.ctx = this.stream = this.node = this.src = null;
+    this.micLevel = 0;
   },
 };
 

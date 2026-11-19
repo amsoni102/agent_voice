@@ -222,8 +222,10 @@ class LocalVoiceSession:
                     assistant_msg["tool_calls"] = ollama_calls
                     self.messages.append(assistant_msg)
                     for call in calls:
-                        # llama3.2 often fires end_call on a greeting — refuse until we've spoken.
-                        if call["name"] == "end_call" and not self._agent_has_spoken():
+                        # llama3.2 often fires end_call on openers/greetings — refuse until a real exchange.
+                        if call["name"] == "end_call" and (
+                            not self._agent_has_spoken() or not self.caller_spoke
+                        ):
                             self.messages.append(
                                 {
                                     "role": "tool",
@@ -231,7 +233,7 @@ class LocalVoiceSession:
                                     "content": json.dumps(
                                         {
                                             "ok": False,
-                                            "error": "Speak your opening first. Only end_call after a real goodbye.",
+                                            "error": "Do not hang up yet. Keep talking until the prospect clearly says goodbye.",
                                         }
                                     ),
                                 }
