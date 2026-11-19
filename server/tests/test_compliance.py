@@ -76,3 +76,5 @@ def test_settings_reject_window_outside_hard_limits():
         validate_agent_settings({"voice": "robot"})
     ok = validate_agent_settings({"test_phone_number": "(512) 555-0199"})
     assert ok["test_phone_number"] == "+15125550199"
+    de = validate_agent_settings({"test_phone_number": "+49 170 1234567"})
+    assert de["test_phone_number"].startswith("+49")

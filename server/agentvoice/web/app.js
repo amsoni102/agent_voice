@@ -418,8 +418,8 @@ Views.agent = async () => {
     <label><input type="checkbox" name="require_consent" ${s.require_consent ? "checked" : ""}> Only call leads with recorded prior express consent (strongly recommended: AI voices count as "artificial voice" under the TCPA)</label>
     </div>
     <div class="card"><h2>Phones</h2><div class="form-grid">
-      <div><label>Transfer hot leads to (your phone)</label><input name="transfer_number" value="${esc(s.transfer_number)}"></div>
-      <div><label>Test phone number (your phone)</label><input name="test_phone_number" value="${esc(s.test_phone_number)}"></div>
+      <div><label>Transfer hot leads to (any country, e.g. +4917…)</label><input name="transfer_number" value="${esc(s.transfer_number)}" placeholder="+491701234567"></div>
+      <div><label>Test phone number (any country, e.g. +4917…)</label><input name="test_phone_number" value="${esc(s.test_phone_number)}" placeholder="+491701234567"></div>
     </div></div>
     <div class="card"><h2>Meeting calendar (your time zone)</h2><div class="form-grid">
       <div><label>Time zone</label><input name="meeting_timezone" value="${esc(s.meeting_timezone)}"></div>

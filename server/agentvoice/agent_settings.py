@@ -107,13 +107,13 @@ def validate_agent_settings(data: dict[str, Any]) -> dict[str, Any]:
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise SettingsError("meeting_timezone must be an IANA zone like America/New_York") from exc
 
-    from .phones import normalize_phone
+    from .phones import normalize_any_phone
 
     for key in ("transfer_number", "test_phone_number"):
         if out[key]:
-            normalized = normalize_phone(out[key])
+            normalized = normalize_any_phone(out[key])
             if normalized is None:
-                raise SettingsError(f"{key} is not a valid US phone number")
+                raise SettingsError(f"{key} is not a valid phone number (use E.164 like +491701234567)")
             out[key] = normalized
     url = out["booking_webhook_url"]
     if url and not url.startswith(("https://", "http://")):

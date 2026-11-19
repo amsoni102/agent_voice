@@ -17,6 +17,21 @@ def normalize_phone(raw: str, region: str = "US") -> str | None:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
+def normalize_any_phone(raw: str, default_region: str = "US") -> str | None:
+    """Return E.164 for any valid country. Prefer +countrycode; otherwise assume `default_region`."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    region = None if text.startswith("+") else default_region
+    try:
+        parsed = phonenumbers.parse(text, region)
+    except phonenumbers.NumberParseException:
+        return None
+    if not phonenumbers.is_valid_number(parsed):
+        return None
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
+
 def phone_timezones(e164: str) -> list[str]:
     try:
         parsed = phonenumbers.parse(e164, None)
