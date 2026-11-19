@@ -65,8 +65,9 @@ class LocalVoiceSession:
         self._speak = speak or speak_pcm24k
         instructions = build_instructions(self.playbook, self.agent_settings, lead, campaign, direction=direction)
         extra = (
-            "\n\nYou are on a live voice call. Keep answers to one or two short spoken sentences. "
-            "Do not use markdown, bullets, or URLs. Call tools when needed, then speak."
+            "\n\nYou are on a live voice call. Always speak out loud in one or two short sentences "
+            "before calling any tool. Do not use markdown, bullets, or URLs. "
+            "Only call a tool when the prospect asked for times, a booking, a callback, DNC, or to hang up."
         )
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": instructions + extra}]
         self.vad = EnergyVad(sample_rate=SAMPLE_RATE)
@@ -221,6 +222,21 @@ class LocalVoiceSession:
                     assistant_msg["tool_calls"] = ollama_calls
                     self.messages.append(assistant_msg)
                     for call in calls:
+                        # llama3.2 often fires end_call on a greeting — refuse until we've spoken.
+                        if call["name"] == "end_call" and not self._agent_has_spoken():
+                            self.messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_name": "end_call",
+                                    "content": json.dumps(
+                                        {
+                                            "ok": False,
+                                            "error": "Speak your opening first. Only end_call after a real goodbye.",
+                                        }
+                                    ),
+                                }
+                            )
+                            continue
                         result = await self.tools.run(call["name"], json.dumps(call.get("arguments") or {}))
                         await self.transport.send_event({"type": "tool", "name": call["name"], "result": result})
                         self.messages.append(
@@ -248,6 +264,9 @@ class LocalVoiceSession:
         except Exception as exc:  # noqa: BLE001
             log.exception("ollama turn failed")
             await self.transport.send_event({"type": "error", "message": f"Ollama error: {exc}"})
+
+    def _agent_has_spoken(self) -> bool:
+        return any(m.get("role") == "assistant" and (m.get("content") or "").strip() for m in self.messages)
 
     async def _say(self, text: str) -> None:
         self._speaking = True

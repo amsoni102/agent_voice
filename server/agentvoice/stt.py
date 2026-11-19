@@ -15,15 +15,18 @@ _lock = asyncio.Lock()
 
 
 async def transcribe_pcm16(pcm: bytes, sample_rate: int, model_size: str = "tiny.en") -> str:
+    import numpy as np
+
     pcm16k = resample_s16(pcm, sample_rate, 16000)
     samples = s16_to_float32(pcm16k)
     if not samples:
         return ""
+    audio = np.asarray(samples, dtype=np.float32)
     model = await _get_model(model_size)
 
     def _run() -> str:
         segments, _info = model.transcribe(
-            samples,
+            audio,
             language="en",
             beam_size=1,
             vad_filter=False,
