@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AgentVoice
+Comment=AI phone sales agent dashboard
+Exec=@ROOT@/deploy/open-dashboard.sh
+Icon=call-start
+Terminal=false
+Categories=Office;Network;

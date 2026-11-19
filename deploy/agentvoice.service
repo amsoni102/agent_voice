@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentVoice AI phone sales agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+ExecStart=@ROOT@/.venv/bin/agentvoice --env @ROOT@/.env serve
+Restart=on-failure
+RestartSec=5
+# Let in-flight calls finish their goodbye before shutdown.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

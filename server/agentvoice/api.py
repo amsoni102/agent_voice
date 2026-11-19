@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
+from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -30,6 +31,23 @@ from .twilio import reject_twiml, stream_twiml, validate_signature
 
 log = logging.getLogger("agentvoice.api")
 WEB_DIR = Path(__file__).parent / "web"
+
+
+class MethodOverrideMiddleware:
+    """Lets clients without PATCH support (java.net.HttpURLConnection) send POST + X-HTTP-Method-Override."""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["method"] == "POST":
+            for name, value in scope.get("headers", []):
+                if name == b"x-http-method-override":
+                    override = value.decode().upper()
+                    if override in ("PATCH", "PUT", "DELETE"):
+                        scope = dict(scope, method=override)
+                    break
+        await self.app(scope, receive, send)
 
 
 def resolve_admin_token(settings: Settings, db: Database) -> str:
@@ -119,6 +137,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         await manager.shutdown()
 
     app = FastAPI(title="AgentVoice", version=__version__, lifespan=lifespan)
+    app.add_middleware(MethodOverrideMiddleware)
     app.state.db = db
     app.state.manager = manager
     app.state.settings = settings
@@ -134,8 +153,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             raise HTTPException(401, "invalid or missing API token")
 
     async def twilio_form(request: Request) -> dict[str, str]:
-        form = await request.form()
-        params = {k: str(v) for k, v in form.items()}
+        body = (await request.body()).decode("utf-8", errors="replace")
+        params = dict(parse_qsl(body, keep_blank_values=True))
         if settings.validate_twilio_signature:
             url = settings.public_base_url + request.url.path
             if request.url.query:

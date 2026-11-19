@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentVoice</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="login-form" class="card login-card">
+      <h1>AgentVoice</h1>
+      <p class="muted">Enter the API token printed by <code>agentvoice token</code>.</p>
+      <input id="login-token" type="password" placeholder="API token" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <div id="app" class="hidden">
+    <aside class="sidebar">
+      <div class="brand">AgentVoice</div>
+      <nav id="nav">
+        <a data-view="overview" class="active">Overview</a>
+        <a data-view="campaigns">Campaigns</a>
+        <a data-view="leads">Leads</a>
+        <a data-view="calls">Calls</a>
+        <a data-view="meetings">Meetings</a>
+        <a data-view="practice">Practice</a>
+        <a data-view="agent">Agent settings</a>
+        <a data-view="playbook">Sales playbook</a>
+        <a data-view="dnc">Do-not-call</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="health" class="muted small"></div>
+        <button id="logout" class="link">Sign out</button>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-body card" id="modal-body"></div></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
