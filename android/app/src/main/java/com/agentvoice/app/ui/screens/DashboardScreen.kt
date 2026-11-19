@@ -85,8 +85,9 @@ fun DashboardScreen() {
                 )
             }
             val warnings = buildList {
-                if (!data.status.openaiConfigured) add("OPENAI_API_KEY is not set on the server: the agent can't speak.")
-                if (!data.status.twilioConfigured) add("Twilio is not configured on the server: phone calls are disabled.")
+                if (!data.status.voiceAvailable) add("No voice backend: start Ollama or set OPENAI_API_KEY.")
+                else if (data.status.voiceBackend == "ollama") add("Voice is local Ollama (${data.status.ollamaModel.ifBlank { "llama3.2" }}). Use the Talk tab.")
+                if (!data.status.twilioConfigured) add("Phone carrier is not configured yet. Talk on this phone still works.")
             }
             items(warnings) { SectionCard { Text(it, color = Warn) } }
 

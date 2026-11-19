@@ -26,6 +26,12 @@ def settings(tmp_path: Path) -> Settings:
         port=8080,
         validate_twilio_signature=True,
         dialer_enabled=False,
+        voice_backend="openai",
+        ollama_base_url="http://127.0.0.1:11434",
+        ollama_model="llama3.2:latest",
+        piper_bin="",
+        piper_model="",
+        whisper_model="tiny.en",
     )
 
 

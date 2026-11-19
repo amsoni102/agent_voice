@@ -9,18 +9,15 @@ qualifies them and books a strategy call to sell websites and mobile apps.
 ## How it works
 
 ```
- Prospect's phone ⇄ Twilio (PSTN) ⇄ Media Stream (WebSocket, μ-law 8 kHz)
-                                          ⇅
-                                AgentVoice server (Linux)  ⇄  OpenAI Realtime (speech-to-speech)
-                                 ├─ dialer + calling rules             └─ voice, turn-taking, tools
-                                 ├─ SQLite: leads, calls, transcripts, meetings, do-not-call list
-                                 └─ REST API ⇄ web dashboard / Android app
+ Phone / Android Talk  ⇄  AgentVoice server (Linux)
+                            ├─ default: Whisper STT → Ollama (llama3.2 @ :11434) → Piper TTS
+                            ├─ optional: OpenAI Realtime (speech-to-speech) if OPENAI_API_KEY is set
+                            ├─ dialer + calling rules, SQLite, REST API
+                            └─ web dashboard / Android app
 ```
 
-Audio goes straight between Twilio and a speech-to-speech model, with no separate
-speech-to-text and text-to-speech hops. Replies are fast and keep a natural tone. The
-caller can interrupt at any time: the agent stops mid-sentence, the unplayed audio is
-cut, and the model only remembers what was actually heard.
+Talk/practice is local by default (no paid API). Phone calls can use the same local stack
+once a carrier is wired; OpenAI Realtime is optional later for faster speech-to-speech.
 
 Each call goes like this:
 
@@ -39,14 +36,17 @@ Each call goes like this:
 
 ```bash
 make install          # creates .venv and .env
-nano .env             # add OPENAI_API_KEY (Twilio can come later)
 make run              # dashboard on http://localhost:8080
 make token            # API token for the dashboard and the Android app
 ```
 
-With only an OpenAI key you can already use **Practice mode** in the dashboard: you play the
-business owner through your microphone and the agent runs the real playbook. Use it to tune
-the pitch before calling anyone.
+**Talk/practice is local by default.** It uses the Ollama already running on this machine
+(`llama3.2` at `http://127.0.0.1:11434`) plus Whisper (listen) and the Piper voice from
+the management assistant. No OpenAI key. Open the Android **Talk** tab (or Practice in the
+dashboard), tap Start, say “Hello?”.
+
+Keep Ollama up: `ollama serve` (and `ollama pull llama3.2` once). Optional: set
+`OPENAI_API_KEY` later for cloud Realtime; `VOICE_BACKEND=auto` switches when that key is present.
 
 Other targets: `make test`, `make install-service` (runs in the background and starts on login),
 and `make install-desktop` (adds an "AgentVoice" launcher that starts the server and opens the dashboard).
@@ -147,6 +147,8 @@ enforces safe defaults, but **you** are responsible for your lead sources and co
 server/agentvoice/
   api.py          REST API, Twilio webhooks, media-stream + practice WebSockets, dashboard
   realtime.py     phone/browser audio ⇄ OpenAI Realtime bridge (barge-in, tools, hangup)
+  local_voice.py  local Talk path: Whisper STT + Ollama + Piper TTS
+  ollama_llm.py   Ollama HTTP client (same API as on this machine, port 11434)
   playbook.py     sales playbook + system-prompt builder (persona, style, flow, objections)
   tools.py        agent tools (booking, callbacks, DNC, transfer...) and calendar slots
   calls.py        dialer, carrier status, retries, post-call summaries

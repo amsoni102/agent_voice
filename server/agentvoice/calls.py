@@ -14,7 +14,7 @@ from .agent_settings import get_agent_settings
 from .compliance import CheckResult, check_lead
 from .config import Settings
 from .db import Database, now_iso, parse_iso, to_iso, utcnow
-from .realtime import VoiceSession
+from .ollama_llm import OllamaClient
 from .research import research_is_fresh, research_website
 from .twilio import TwilioClient, TwilioError
 
@@ -41,7 +41,7 @@ class CallManager:
         self.settings = settings
         self.db = db
         self.twilio: TwilioClient | None = TwilioClient(settings) if settings.twilio_configured else None
-        self.sessions: dict[int, VoiceSession] = {}
+        self.sessions: dict[int, Any] = {}
         self._dialer_task: asyncio.Task[Any] | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._dial_lock = asyncio.Lock()
@@ -79,7 +79,7 @@ class CallManager:
             await asyncio.sleep(5)
 
     async def dial_tick(self) -> int:
-        if self.twilio is None or not self.settings.openai_configured:
+        if self.twilio is None or not self.settings.voice_available:
             return 0
         agent = get_agent_settings(self.db)
         loop = asyncio.get_running_loop()
@@ -125,8 +125,8 @@ class CallManager:
     ) -> dict[str, Any]:
         if self.twilio is None:
             raise CallError("Twilio is not configured (see .env)")
-        if not self.settings.openai_configured:
-            raise CallError("OPENAI_API_KEY is not configured")
+        if not self.settings.voice_available:
+            raise CallError("No voice backend (start Ollama or set OPENAI_API_KEY)")
         agent = agent or get_agent_settings(self.db)
         result = preflight or check_lead(self.db, lead, agent)
         if not result.ok:
@@ -146,8 +146,8 @@ class CallManager:
     async def place_test_call(self, phone: str) -> dict[str, Any]:
         if self.twilio is None:
             raise CallError("Twilio is not configured (see .env)")
-        if not self.settings.openai_configured:
-            raise CallError("OPENAI_API_KEY is not configured")
+        if not self.settings.voice_available:
+            raise CallError("No voice backend (start Ollama or set OPENAI_API_KEY)")
         agent = get_agent_settings(self.db)
         if not agent["test_phone_number"] or phone != agent["test_phone_number"]:
             raise CallError("test calls can only go to the configured test_phone_number")
@@ -272,26 +272,31 @@ class CallManager:
             if call and not call.get("outcome"):
                 self.db.update_call(call_id, outcome="no_conversation")
             return
-        if not self.settings.openai_configured:
-            return
         text = "\n".join(f"{t['role'].upper()}: {t['text']}" for t in transcript)
-        body = {
-            "model": self.settings.summary_model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SUMMARY_PROMPT},
-                {"role": "user", "content": text[-60_000:]},
-            ],
-        }
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {self.settings.openai_api_key}"},
-                    json=body,
+            if self.settings.openai_configured:
+                body = {
+                    "model": self.settings.summary_model,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": SUMMARY_PROMPT},
+                        {"role": "user", "content": text[-60_000:]},
+                    ],
+                }
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {self.settings.openai_api_key}"},
+                        json=body,
+                    )
+                    resp.raise_for_status()
+                    data = json.loads(resp.json()["choices"][0]["message"]["content"])
+            elif self.settings.uses_ollama:
+                data = await OllamaClient(self.settings.ollama_base_url, self.settings.ollama_model).summarize_json(
+                    SUMMARY_PROMPT, text[-60_000:]
                 )
-                resp.raise_for_status()
-                data = json.loads(resp.json()["choices"][0]["message"]["content"])
+            else:
+                return
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             log.warning("call %s: summary failed: %s", call_id, exc)
             return

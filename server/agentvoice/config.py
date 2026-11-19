@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+_DEFAULT_PIPER_DIR = Path.home() / ".local/share/management-assistant/voice"
+
 
 def load_dotenv(path: Path) -> None:
     if not path.is_file():
@@ -45,10 +47,29 @@ class Settings:
     port: int
     validate_twilio_signature: bool
     dialer_enabled: bool
+    voice_backend: str
+    ollama_base_url: str
+    ollama_model: str
+    piper_bin: str
+    piper_model: str
+    whisper_model: str
 
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def uses_ollama(self) -> bool:
+        backend = (self.voice_backend or "auto").strip().lower()
+        if backend == "ollama":
+            return True
+        if backend == "openai":
+            return False
+        return not self.openai_configured
+
+    @property
+    def voice_available(self) -> bool:
+        return self.openai_configured or self.uses_ollama
 
     @property
     def twilio_configured(self) -> bool:
@@ -92,4 +113,10 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         port=int(os.environ.get("PORT", "8080")),
         validate_twilio_signature=_bool("TWILIO_VALIDATE_SIGNATURE", True),
         dialer_enabled=_bool("DIALER_ENABLED", True),
+        voice_backend=os.environ.get("VOICE_BACKEND", "auto").strip() or "auto",
+        ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+        ollama_model=os.environ.get("OLLAMA_MODEL", "llama3.2:latest"),
+        piper_bin=os.environ.get("PIPER_BIN", str(_DEFAULT_PIPER_DIR / "piper" / "piper")),
+        piper_model=os.environ.get("PIPER_MODEL", str(_DEFAULT_PIPER_DIR / "en_US-ryan-high.onnx")),
+        whisper_model=os.environ.get("WHISPER_MODEL", "tiny.en"),
     )

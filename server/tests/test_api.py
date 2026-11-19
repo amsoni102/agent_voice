@@ -30,6 +30,18 @@ def test_auth_required(settings, db):
         assert client.get("/api/status", headers={"Authorization": "Bearer nope"}).status_code == 401
         body = client.get("/api/status", headers=AUTH).json()
         assert body["twilio_configured"] and body["openai_configured"]
+        assert body["voice_backend"] == "openai" and body["voice_available"] is True
+
+
+def test_status_reports_ollama_when_openai_key_missing(make_settings, db):
+    settings = make_settings(openai_api_key="", twilio_account_sid="", voice_backend="auto")
+    with client_for(settings, db) as client:
+        body = client.get("/api/status", headers=AUTH).json()
+        assert body["voice_backend"] == "ollama"
+        assert body["voice_available"] is True
+        assert body["ollama_model"] == "llama3.2:latest"
+        assert body["openai_configured"] is False
+        assert body["twilio_configured"] is False
 
 
 def test_campaign_lead_and_settings_flow(settings, db):

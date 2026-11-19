@@ -33,10 +33,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"\n  AgentVoice dashboard: http://localhost:{args.port or settings.port}/")
     if not settings.admin_token:
         print(f"  API token (generated, also in `agentvoice token`): {token}")
-    if not settings.openai_configured:
-        print("  WARNING: OPENAI_API_KEY is not set; calls and practice mode are disabled.")
+    if settings.uses_ollama:
+        print(f"  Voice: local Ollama ({settings.ollama_model} at {settings.ollama_base_url})")
+    elif settings.openai_configured:
+        print(f"  Voice: OpenAI Realtime ({settings.realtime_model})")
+    else:
+        print("  WARNING: no voice backend (start Ollama or set OPENAI_API_KEY).")
     if not settings.twilio_configured:
-        print("  WARNING: Twilio is not fully configured; phone calls are disabled (practice mode still works).")
+        print("  Twilio is not configured; phone calls are disabled. Talk/practice still works.")
     print()
     uvicorn.run(
         app,

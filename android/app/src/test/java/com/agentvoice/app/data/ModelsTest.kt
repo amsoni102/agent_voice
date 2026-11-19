@@ -27,6 +27,24 @@ class ModelsTest {
     }
 
     @Test
+    fun parsesOllamaVoiceStatus() {
+        val json = JSONObject(
+            """
+            {"version":"1.0.0","twilio_configured":false,"openai_configured":false,
+             "voice_backend":"ollama","ollama_model":"llama3.2:latest","voice_available":true,
+             "from_number":"","running_campaigns":[],
+             "today":{"dials":0,"conversations":0,"voicemails":0,"talk_minutes":0,"meetings_booked":0,"active_calls":0},
+             "last_7_days":{"dials":0,"conversations":0,"voicemails":0,"talk_minutes":0,"meetings_booked":0,"active_calls":0}}
+            """.trimIndent()
+        )
+        val status = json.toServerStatus()
+        assertEquals("ollama", status.voiceBackend)
+        assertEquals("llama3.2:latest", status.ollamaModel)
+        assertTrue(status.voiceAvailable)
+        assertEquals(false, status.openaiConfigured)
+    }
+
+    @Test
     fun extractsServerErrorMessages() {
         assertEquals("Invalid API token", ApiClient.errorMessage(401, "{}"))
         assertEquals("cannot call now: outside calling hours", ApiClient.errorMessage(409, """{"detail":"cannot call now: outside calling hours"}"""))

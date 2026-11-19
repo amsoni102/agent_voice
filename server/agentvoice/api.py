@@ -25,7 +25,7 @@ from .db import LEAD_STATUSES, Database, utcnow
 from .importer import import_leads_csv, parse_phone_list
 from .phones import normalize_phone
 from .playbook import DEFAULT_PLAYBOOK, build_instructions, get_playbook, save_playbook
-from .realtime import VoiceSession
+from .local_voice import create_voice_session
 from .transports import BrowserTransport, TwilioTransport
 from .twilio import reject_twiml, stream_twiml, validate_signature
 
@@ -132,7 +132,13 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         manager.start()
-        log.info("AgentVoice %s ready. Twilio=%s OpenAI=%s", __version__, settings.twilio_configured, settings.openai_configured)
+        log.info(
+            "AgentVoice %s ready. Twilio=%s voice=%s ollama=%s",
+            __version__,
+            settings.twilio_configured,
+            "ollama" if settings.uses_ollama else ("openai" if settings.openai_configured else "none"),
+            settings.ollama_model if settings.uses_ollama else "-",
+        )
         yield
         await manager.shutdown()
 
@@ -208,6 +214,9 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             "version": __version__,
             "twilio_configured": settings.twilio_configured,
             "openai_configured": settings.openai_configured,
+            "voice_backend": "ollama" if settings.uses_ollama else ("openai" if settings.openai_configured else "none"),
+            "ollama_model": settings.ollama_model if settings.uses_ollama else "",
+            "voice_available": settings.voice_available,
             "dialer_enabled": settings.dialer_enabled,
             "public_base_url": settings.public_base_url,
             "from_number": settings.twilio_from_number,
@@ -234,8 +243,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.post("/api/campaigns/{campaign_id}/start", dependencies=auth)
     async def start_campaign(campaign_id: int) -> dict[str, Any]:
         campaign_or_404(campaign_id)
-        if not settings.twilio_configured or not settings.openai_configured:
-            raise HTTPException(409, "configure Twilio and OpenAI in .env before starting a campaign")
+        if not settings.twilio_configured or not settings.voice_available:
+            raise HTTPException(409, "configure Twilio and a voice backend (Ollama or OpenAI) before starting a campaign")
         return db.update_campaign(campaign_id, status="running")  # type: ignore[return-value]
 
     @app.post("/api/campaigns/{campaign_id}/pause", dependencies=auth)
@@ -456,7 +465,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
     @app.post("/twilio/inbound")
     async def twilio_inbound(request: Request) -> Response:
         params = await twilio_form(request)
-        if not settings.openai_configured:
+        if not settings.voice_available:
             return Response(reject_twiml("Sorry, we can't take your call right now. Please try again later."), media_type="application/xml")
         phone = normalize_phone(params.get("From", "")) or params.get("From", "unknown")
         lead = db.find_lead_by_phone(phone)
@@ -515,7 +524,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
                     transport.call_sid = start.get("callSid") or call.get("twilio_sid")
                     lead = db.get_lead(call["lead_id"]) if call.get("lead_id") else None
                     campaign = db.get_campaign(call["campaign_id"]) if call.get("campaign_id") else None
-                    session = VoiceSession(
+                    session = create_voice_session(
                         settings=settings,
                         db=db,
                         call=call,
@@ -549,8 +558,8 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             await ws.close(code=1008)
             return
         await ws.accept()
-        if not settings.openai_configured:
-            await ws.send_json({"type": "error", "message": "OPENAI_API_KEY is not configured on the server"})
+        if not settings.voice_available:
+            await ws.send_json({"type": "error", "message": "No voice backend: start Ollama or set OPENAI_API_KEY"})
             await ws.close()
             return
         lead = db.get_lead(lead_id) if lead_id else None
@@ -558,7 +567,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         call = db.create_call(phone=lead["phone"] if lead else "", lead_id=None, campaign_id=None, direction="outbound", kind="practice")
         db.update_call(call["id"], status="in-progress", answered_at=utcnow().isoformat(timespec="seconds"))
         transport = BrowserTransport(ws)
-        session = VoiceSession(
+        session = create_voice_session(
             settings=settings,
             db=db,
             call=call,

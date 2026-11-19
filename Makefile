@@ -19,7 +19,7 @@ ENV_FILE := $(CURDIR)/.env
 $(BIN)/agentvoice: server/pyproject.toml
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install -q --upgrade pip
-	$(BIN)/pip install -q -e "server[dev]"
+	$(BIN)/pip install -q -e "server[dev,local]"
 	@touch $@
 
 install: $(BIN)/agentvoice $(ENV_FILE)

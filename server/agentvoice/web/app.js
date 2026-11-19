@@ -121,7 +121,8 @@ Views.overview = async () => {
     ]);
     $("#health").textContent = `v${st.version} · ${st.running_campaigns.length} campaign(s) running`;
     const warn = [];
-    if (!st.openai_configured) warn.push("OPENAI_API_KEY is not set in .env: the agent can't speak.");
+    if (!st.voice_available) warn.push("No voice backend: start Ollama (llama3.2) or set OPENAI_API_KEY.");
+    else if (st.voice_backend === "ollama") warn.push("Voice is local Ollama (" + (st.ollama_model || "llama3.2") + "). Free, a bit slower, fine for practice.");
     if (!st.twilio_configured) warn.push("Twilio is not configured in .env (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, PUBLIC_BASE_URL): phone calls are disabled. Practice mode still works.");
     const stat = (v, l) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`;
     const t = st.today, w = st.last_7_days;
