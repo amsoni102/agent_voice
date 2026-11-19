@@ -103,7 +103,7 @@ def test_instructions_contain_disclosure_and_lead_context(db):
     lead = db.get_lead(lead["id"])
     lead["research"] = {"talking_points": ["Their site doesn't look mobile-friendly."]}
     text = build_instructions(DEFAULT_PLAYBOOK, DEFAULT_AGENT_SETTINGS, lead, now_utc=MONDAY_9UTC)
-    assert "I'm an AI assistant calling for Brightline Digital" in text
+    assert "I'm an AI assistant calling for Stellar Technologies" in text
     assert "Joe's Tacos" in text and "mobile-friendly" in text
     assert "America/Chicago" in text
     assert "Never claim or imply you're human" in text

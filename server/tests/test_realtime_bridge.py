@@ -50,7 +50,7 @@ async def fake_openai(received: list[dict], ws):
                 {"type": "response.output_audio.delta", "item_id": "item_1", "delta": audio},
                 {"type": "response.output_audio.done", "item_id": "item_1"},
                 {"type": "response.output_audio_transcript.done", "item_id": "item_1",
-                 "transcript": "Hey, it's Alex with Brightline Digital."},
+                 "transcript": "Hey, it's Alex with Stellar Technologies."},
                 {"type": "response.function_call_arguments.done", "call_id": "fc_1",
                  "name": "set_outcome", "arguments": json.dumps({"outcome": "not_interested"})},
                 {"type": "response.function_call_arguments.done", "call_id": "fc_2",

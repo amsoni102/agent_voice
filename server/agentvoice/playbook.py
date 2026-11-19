@@ -11,8 +11,8 @@ from .db import Database, utcnow
 
 DEFAULT_PLAYBOOK: dict[str, Any] = {
     "agent_name": "Alex",
-    "company_name": "Brightline Digital",
-    "company_website": "brightlinedigital.com",
+    "company_name": "Stellar Technologies",
+    "company_website": "stellartechnologies.com",
     "company_location": "Austin, Texas",
     "callback_number": "",
     "lead_source_explanation": "I came across your business in a public business listing online.",
