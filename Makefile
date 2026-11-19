@@ -2,6 +2,7 @@
 #
 #   make install          create .venv and install the server
 #   make run              run the server + dashboard on http://localhost:8080
+#   make voice            download the Kokoro voice model (done by make install)
 #   make stop             stop the server (ports from .env, plus any leftover agentvoice)
 #   make token            print the API token for the dashboard / Android app
 #   make test             run the server test suite
@@ -17,8 +18,10 @@ ENV_FILE := $(CURDIR)/.env
 # Defaults match .env.example; overridden below when .env exists.
 PORT ?= 8080
 HTTPS_PORT ?= 8443
+KOKORO_DIR := $(HOME)/.local/share/agentvoice/kokoro
+KOKORO_URL := https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
 
-.PHONY: install run stop token test install-service uninstall-service install-desktop compile_apk release_apk clean
+.PHONY: install voice run stop token test install-service uninstall-service install-desktop compile_apk release_apk clean
 
 ifneq (,$(wildcard $(ENV_FILE)))
   PORT := $(shell awk -F= '/^PORT=/{gsub(/\r/,""); print $$2; exit}' $(ENV_FILE))
@@ -37,8 +40,14 @@ $(BIN)/agentvoice: server/pyproject.toml
 	$(BIN)/pip install -q -e "server[dev,local]"
 	@touch $@
 
-install: $(BIN)/agentvoice $(ENV_FILE)
+install: $(BIN)/agentvoice $(ENV_FILE) voice
 	@echo "Installed. Edit $(ENV_FILE), then: make run"
+
+voice: $(KOKORO_DIR)/kokoro-v1.0.onnx $(KOKORO_DIR)/voices-v1.0.bin
+
+$(KOKORO_DIR)/%:
+	@mkdir -p $(KOKORO_DIR)
+	curl -fL --progress-bar -o $@.part $(KOKORO_URL)/$* && mv $@.part $@
 
 $(ENV_FILE):
 	cp .env.example $(ENV_FILE)

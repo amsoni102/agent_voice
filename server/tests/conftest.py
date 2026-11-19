@@ -38,6 +38,7 @@ def settings(tmp_path: Path) -> Settings:
         piper_bin="",
         piper_model="",
         whisper_model="tiny.en",
+        tts_engine="piper",
     )
 
 

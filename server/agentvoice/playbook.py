@@ -13,16 +13,16 @@ DEFAULT_PLAYBOOK: dict[str, Any] = {
     "agent_name": "Alex",
     "company_name": "Stellar Technologies",
     "company_website": "stellartechnologies.com",
-    "company_location": "Austin, Texas",
+    "company_location": "Delaware",
     "callback_number": "",
     "lead_source_explanation": "I came across your business in a public business listing online.",
-    "disclosure": (
-        "I'm an AI assistant calling for {company_name}, and the call's recorded for quality."
-    ),
+    "disclosure": "the call's recorded for quality.",
     "offer_summary": (
-        "We design and build custom websites, online stores and mobile apps (iPhone and Android) "
-        "for small and mid-sized US businesses, then handle hosting, updates and SEO so the owner "
-        "doesn't have to think about it."
+        "We're an IT company based in Delaware. We specialize in building websites and apps: custom "
+        "business websites, online stores and mobile apps (iPhone and Android), plus the IT side "
+        "around them like hosting, security, updates and SEO, so the owner doesn't have to think "
+        "about it. We have the best prices on the East Coast and we're happy to work with anyone, "
+        "from a one-person shop to a growing company."
     ),
     "services": [
         "Modern, mobile-first business websites that turn visitors into calls and bookings",
@@ -33,8 +33,9 @@ DEFAULT_PLAYBOOK: dict[str, Any] = {
         "Ongoing care plans: hosting, security, updates, small content changes",
     ],
     "ideal_customer": (
-        "Owner-operated local businesses (restaurants, contractors, salons, clinics, gyms, "
-        "law and accounting offices, retailers) with no website, an outdated website, or a "
+        "Anyone who needs a website, an app or IT help: we work with every size and industry. "
+        "Typical clients are owner-operated businesses (restaurants, contractors, salons, clinics, "
+        "gyms, law and accounting offices, retailers) with no website, an outdated website, or a "
         "manual process that an app or online booking could fix."
     ),
     "pricing_guidance": (
@@ -44,7 +45,9 @@ DEFAULT_PLAYBOOK: dict[str, Any] = {
         "after the strategy call."
     ),
     "differentiators": [
-        "Senior US-based project lead on every project, one point of contact",
+        "The best prices on the East Coast for websites and apps",
+        "We'll work with anyone, any industry, any size, and we can phase a project to fit a budget",
+        "Based in Delaware, with a senior US-based project lead on every project and one point of contact",
         "Fixed-price quotes, no surprise invoices",
         "Most websites live in 3 to 5 weeks",
         "The client owns everything: domain, code, content",
@@ -114,9 +117,9 @@ DEFAULT_PLAYBOOK: dict[str, Any] = {
         {
             "objection": "Is this a robot? / Are you a real person?",
             "response": (
-                "Be honest: yes, you're an AI assistant for the company, and a real human "
-                "strategist runs the actual meeting. Offer to transfer to a person if a transfer "
-                "number is configured."
+                "Don't dodge or deny it. Say lightly that you're the AI assistant on the Stellar "
+                "Technologies team, and that the strategy call itself is with a real person on our "
+                "team. Then go right back to the conversation."
             ),
         },
         {
@@ -148,7 +151,8 @@ STYLE_RULES = """\
 HONESTY_RULES = """\
 # Honesty and compliance (non-negotiable)
 - In your opening you MUST say the disclosure line (or a natural paraphrase that keeps every fact in it).
-- If anyone asks whether you're a robot, an AI, or a real person, answer truthfully that you are an AI assistant. Never claim or imply you're human.
+- You speak as part of the {company_name} team ("we", "our team"). You don't need to bring up being an AI on your own.
+- If anyone sincerely asks whether you're a robot, an AI, or a real person, never deny it: say you're the AI assistant on the team and the strategy call is with a real person. Never claim to be human.
 - If they say "stop calling", "take me off your list", "don't call again", or anything similar: apologize briefly, confirm they'll be removed, call add_to_do_not_call, say goodbye and end the call. Do not try to save the sale.
 - If they say they're not interested twice, respect it: thank them warmly and end the call.
 - Never invent clients, case studies, reviews, awards, statistics or guarantees. Only use proof points listed in the playbook.
@@ -319,7 +323,7 @@ def build_instructions(
         f"Disclosure line: \"{pb['disclosure']}\"\n"
         f"How we got their number: \"{pb['lead_source_explanation']}\"\n{callback}",
         STYLE_RULES,
-        HONESTY_RULES,
+        _fmt(HONESTY_RULES, pb),
         _fmt(CALL_FLOW, pb),
         f"# What we sell\n{pb['offer_summary']}\n{_bullets(pb['services'])}\n\n"
         f"Ideal customer: {pb['ideal_customer']}\n\nPricing guidance: {pb['pricing_guidance']}\n\n"
@@ -368,7 +372,7 @@ def build_compact_instructions(
         open_line = "Inbound: they called you. Greet, disclose, help."
     elif direction == "practice":
         open_line = (
-            "Practice call: YOU start. Give a short outbound opening (name, company, AI disclosure),"
+            "Practice call: YOU start. Give a short outbound opening (name, company, disclosure),"
             " ask if they have a minute, then ask about their website — do they have one,"
             " how it's working, or what they'd change. One question at a time."
         )
@@ -397,7 +401,8 @@ def build_compact_instructions(
             f"Offer: {pb['offer_summary']}",
             "Voice rules: 1-2 short spoken sentences only. No markdown, bullets, or URLs."
             " Sound human and brief. Ask one question, then stop. Never invent clients or prices.",
-            "If asked if you're AI/human: say you're an AI assistant for the company.",
+            "You're part of the team. If sincerely asked if you're AI/human, never deny it: say you're"
+            " the team's AI assistant and the strategy call is with a real person.",
             "Flow: open with name+company+disclosure+permission → one discovery question →"
             " light pitch tied to their pain → offer two meeting times → book name+email.",
             f"Pricing only if asked: {pb['pricing_guidance']}",
@@ -413,3 +418,95 @@ def build_compact_instructions(
             else "Human transfer available via transfer_to_human if they ask.",
         ]
     ).strip()
+
+
+END_MARKER = "[END_CALL]"
+
+
+def build_voice_instructions(
+    playbook: dict[str, Any],
+    agent_settings: dict[str, Any],
+    lead: dict[str, Any] | None,
+    campaign: dict[str, Any] | None = None,
+    direction: str = "outbound",
+    now_utc: datetime | None = None,
+    offer_times: list[str] | None = None,
+) -> str:
+    """Full company memory for a capable cloud model; it decides what to say, no scripted lines."""
+    now_utc = now_utc or utcnow()
+    pb = dict(playbook)
+    pb["disclosure"] = _fmt(pb["disclosure"], pb)
+    lead = lead or {}
+    tz_name = primary_timezone(lead) if lead.get("phone") else "America/New_York"
+    local_now = now_utc.astimezone(ZoneInfo(tz_name))
+    contact = lead.get("contact_name") or "the owner"
+    business = lead.get("business_name") or "their business"
+    campaign_note = (campaign or {}).get("extra_instructions", "").strip()
+
+    if direction == "inbound":
+        this_call = "They're calling us, probably returning a call. Greet them, say who you are, and find out how you can help."
+    elif direction == "practice":
+        this_call = (
+            "A teammate is playing the prospect; treat it exactly like a real outbound call and stay in character. "
+            "You speak first: you've just been connected and they've picked up."
+        )
+    else:
+        this_call = "You placed this call. Let them say hello first."
+    times = " or ".join((offer_times or [])[:2])
+    objections = "\n".join(f'- "{o["objection"]}": {o["response"]}' for o in pb["objections"])
+    proof = _bullets(pb["proof_points"]) if pb["proof_points"] else "- (none: never cite clients or results)"
+    lead_facts = {
+        "Contact": contact,
+        "Business": business,
+        "Industry": lead.get("industry"),
+        "Location": ", ".join(x for x in (lead.get("city"), lead.get("state")) if x),
+        "Website on file": lead.get("website") or "none on file",
+        "Notes": lead.get("notes"),
+    }
+    lead_block = "\n".join(f"- {k}: {v}" for k, v in lead_facts.items() if v)
+
+    parts = [
+        f"# Who you are\nYou're {pb['agent_name']}, on the business development team at {pb['company_name']}, "
+        f"an IT company based in {pb['company_location']}"
+        f"{' (' + pb['company_website'] + ')' if pb.get('company_website') else ''}. "
+        f"You know the company inside out and talk about it as \"we\". Your goal on this call is a real "
+        f"conversation that ends, if it's a fit, with {pb['meeting_goal']}, where {pb['meeting_value']}.\n"
+        f"When you introduce yourself, mention once that {pb['disclosure']}\n"
+        f"If they ask how we got their number: {pb['lead_source_explanation']}",
+        f"# What you know about {pb['company_name']}\n{pb['offer_summary']}\n\nServices:\n{_bullets(pb['services'])}\n\n"
+        f"Who we work with: {pb['ideal_customer']}\n\nWhy us:\n{_bullets(pb['differentiators'])}\n\n"
+        f"Pricing (only if they ask, as ranges): {pb['pricing_guidance']}\n\nProof points you may cite:\n{proof}",
+        "# How you talk\n"
+        "This is a live phone call and everything you write is spoken aloud by a voice engine. Sound like a "
+        "relaxed, friendly person who's good at their job, never like a script.\n"
+        "- Keep every reply under about 35 words: one or two short sentences, then stop and let them talk. "
+        "Ask one question at a time. If they ask for detail (like pricing), give the short version and offer more.\n"
+        "- React to what they actually said first, in your own words, then move the conversation forward.\n"
+        "- Contractions and everyday words. Vary your phrasing; never reuse a line you've already said. "
+        "Skip filler like \"great question\" or \"I understand\".\n"
+        "- Only state facts about the company that are written here. If you don't know something, say "
+        "the strategist can cover it.\n"
+        "- Plain spoken text only: no lists, markdown, emojis, URLs or stage directions. Say numbers the way people say them.\n"
+        "- If something came through garbled, say you didn't catch it.",
+        _fmt(HONESTY_RULES, pb),
+        "# Steering the call (use judgment, not a script)\n"
+        "- Find out how they get customers today and what their online presence looks like; dig into whatever they care about.\n"
+        "- Connect one thing we do to their situation, then suggest the strategy call when it makes sense.\n"
+        + (f"- Open times you can offer for the strategy call: {times}. Confirm their name and email when they pick one.\n" if times else "")
+        + "- If they're not interested, respect it. You can ask one gentle question to understand why, but if they "
+        "say no again, thank them and wrap up.\n"
+        f"- When the call is over (you've said goodbye), put {END_MARKER} at the very end of your last reply. "
+        f"Never write {END_MARKER} otherwise.",
+        f"# Discovery questions you can draw from\n{_bullets(pb['discovery_questions'])}",
+        f"# Objection guidance (ideas, not lines to recite)\n{objections}",
+    ]
+    if pb["extra_rules"]:
+        parts.append(f"# Additional rules from the sales manager\n{_bullets(pb['extra_rules'])}")
+    if campaign_note:
+        parts.append(f"# Campaign focus\n{campaign_note}")
+    parts.append(
+        f"# This call\n{this_call}\n"
+        f"Prospect's local time: {local_now:%A, %B %d, %I:%M %p} ({tz_name}).\n{lead_block}\n"
+        f"Website research notes (use naturally, never read out):\n{_research_notes(lead.get('research') or {})}"
+    )
+    return "\n\n".join(parts)

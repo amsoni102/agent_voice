@@ -103,10 +103,19 @@ def test_instructions_contain_disclosure_and_lead_context(db):
     lead = db.get_lead(lead["id"])
     lead["research"] = {"talking_points": ["Their site doesn't look mobile-friendly."]}
     text = build_instructions(DEFAULT_PLAYBOOK, DEFAULT_AGENT_SETTINGS, lead, now_utc=MONDAY_9UTC)
-    assert "I'm an AI assistant calling for Stellar Technologies" in text
+    assert "the call's recorded for quality" in text
     assert "Joe's Tacos" in text and "mobile-friendly" in text
     assert "America/Chicago" in text
-    assert "Never claim or imply you're human" in text
+    assert "never deny it" in text and "Never claim to be human" in text
+
+
+def test_voice_instructions_carry_company_memory(db):
+    from agentvoice.playbook import END_MARKER, build_voice_instructions
+
+    text = build_voice_instructions(DEFAULT_PLAYBOOK, DEFAULT_AGENT_SETTINGS, None, direction="practice", now_utc=MONDAY_9UTC)
+    assert "Delaware" in text and "East Coast" in text and "work with anyone" in text
+    assert "Stellar Technologies team" in text and "never deny it" in text
+    assert END_MARKER in text and "{company_name}" not in text
 
 
 def test_spoken_time():

@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
-local = ["faster-whisper>=1.0"]
+local = ["faster-whisper>=1.0", "kokoro-onnx>=0.4"]
 
 [project.scripts]
 agentvoice = "agentvoice.__main__:main"

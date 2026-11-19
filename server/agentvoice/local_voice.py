@@ -1,9 +1,10 @@
-"""Practice/call voice using Whisper + Piper + Ollama or Gemini (no OpenAI Realtime)."""
+"""Practice/call voice using Whisper + Kokoro/Piper + Ollama or Gemini (no OpenAI Realtime)."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import re
@@ -16,12 +17,12 @@ from .db import Database
 from .gemini_llm import GeminiClient
 from .ollama_llm import OllamaClient, speakable
 from .openai_chat_llm import OpenAIChatClient
-from .playbook import build_compact_instructions, get_playbook
+from .playbook import END_MARKER, build_compact_instructions, build_voice_instructions, get_playbook
 from .realtime import Transport
 from .stt import preload as preload_stt
 from .stt import transcribe_pcm16
 from .tools import ToolRunner, open_slots, spoken_time
-from .tts import speak_pcm24k
+from .tts import KokoroVoice, speak_pcm24k
 from .vad import VAD_RATE, SileroEndpointer, VadEvent, silero_available
 
 
@@ -43,6 +44,21 @@ _DECLINE = re.compile(
     r"\b(not interested|no,? thanks?|no,? thank you|not right now|not now|don'?t need|we'?re good|we are good|no need|pass)\b"
 )
 _SENTENCE_END = re.compile(r"[.!?](?=\s)")
+_CLAUSE_END = re.compile(r"[,;:—](?=\s)")
+_END_MARK = re.compile(r"\[?\s*END_CALL\s*\]?", re.I)
+FIRST_CLAUSE_CHARS = 12  # speak the first clause early so the voice starts sooner
+LONG_CLAUSE_CHARS = 45  # later sentences split at commas past this, keeping TTS chunks short
+
+
+def _next_cut(text: str, first: bool) -> int | None:
+    """End index of the next speakable unit in streamed text, or None to wait for more."""
+    sentence = _SENTENCE_END.search(text)
+    limit = sentence.end() if sentence else len(text)
+    min_clause = FIRST_CLAUSE_CHARS if first else LONG_CLAUSE_CHARS
+    for m in _CLAUSE_END.finditer(text, 0, limit):
+        if m.end() >= min_clause:
+            return m.end()
+    return sentence.end() if sentence else None
 
 
 def classify_intent(text: str) -> str | None:
@@ -114,9 +130,17 @@ class LocalVoiceSession:
         )
         self.llm = llm or make_llm(settings)
         self._transcribe = transcribe or transcribe_pcm16
-        self._speak = speak or speak_pcm24k
+        self.kokoro = (
+            KokoroVoice(settings.kokoro_model, settings.kokoro_voices, settings.kokoro_voice, settings.kokoro_speed)
+            if settings.tts_engine == "kokoro" and speak is None
+            else None
+        )
+        self._speak = speak or functools.partial(speak_pcm24k, kokoro=self.kokoro)
         # Gemini (and small Ollama) stay tool-free by default; Ollama tools only when explicitly on.
         self.use_tools = bool(settings.ollama_tools and settings.uses_ollama)
+        # Small local models need per-turn steering; capable cloud models run on the playbook alone.
+        self.scripted = settings.uses_ollama
+        self._model_hangup = False
         self.declines = 0
         offer_times: list[str] = []
         if not self.use_tools:
@@ -128,10 +152,16 @@ class LocalVoiceSession:
                 offer_times = [spoken_time(s) for s in slots]
             except Exception:  # noqa: BLE001
                 log.exception("call %s: could not compute open slots", self.call_id)
-        instructions = build_compact_instructions(
-            self.playbook, self.agent_settings, lead, campaign, direction=direction,
-            tools=self.use_tools, offer_times=offer_times,
-        )
+        if self.scripted:
+            instructions = build_compact_instructions(
+                self.playbook, self.agent_settings, lead, campaign, direction=direction,
+                tools=self.use_tools, offer_times=offer_times,
+            )
+        else:
+            instructions = build_voice_instructions(
+                self.playbook, self.agent_settings, lead, campaign, direction=direction,
+                offer_times=offer_times,
+            )
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": instructions}]
         self.endpointer = SileroEndpointer(in_rate=SAMPLE_RATE) if silero_available() else None
         self.vad = EnergyVad(sample_rate=SAMPLE_RATE)
@@ -153,6 +183,8 @@ class LocalVoiceSession:
         self._tasks.append(asyncio.create_task(self.llm.warmup(), name=f"llm-warm-{self.call_id}"))
         if self._transcribe is transcribe_pcm16:
             self._tasks.append(asyncio.create_task(preload_stt(self.settings.whisper_model), name=f"stt-warm-{self.call_id}"))
+        if self.kokoro is not None:
+            self._tasks.append(asyncio.create_task(self.kokoro.preload(), name=f"tts-warm-{self.call_id}"))
         self._tasks.append(asyncio.create_task(self._max_duration_guard(), name=f"local-guard-{self.call_id}"))
         if self.direction == "inbound":
             await self._respond("The prospect just called in. Greet them.")
@@ -170,6 +202,9 @@ class LocalVoiceSession:
         # Short beat so the WebSocket/mic is ready, then the agent starts talking.
         await asyncio.sleep(0.4)
         if self.caller_spoke or self.agent_started or self._finished:
+            return
+        if not self.scripted:
+            await self._respond()
             return
         business = (self.lead or {}).get("business_name") or "your business"
         await self._respond(
@@ -460,6 +495,11 @@ class LocalVoiceSession:
         intent = classify_intent(user_text) if user_text and self._agent_has_spoken() else None
         if intent == "dnc":
             nudge, end_reason = "They asked not to be called again. Apologize in one sentence, confirm they are removed, and say goodbye.", "do not call"
+        elif not self.scripted:
+            # The model handles the conversation from its playbook; rules only enforce hangups.
+            nudge = ""
+            if intent == "bye":
+                end_reason = "prospect said goodbye"
         elif intent == "bye":
             nudge, end_reason = "They are ending the call. Thank them and say goodbye in one short sentence.", "prospect said goodbye"
         elif intent == "decline":
@@ -527,6 +567,7 @@ class LocalVoiceSession:
         elif intent == "decline":
             self.declines += 1
 
+        self._model_hangup = False
         source = None
         if prefetched is not None and prefetched.user_text == user_text and not system_nudge:
             source = prefetched.chunks()
@@ -547,6 +588,8 @@ class LocalVoiceSession:
         self.db.add_transcript(self.call_id, "agent", text)
         await self.transport.send_event({"type": "transcript", "role": "agent", "text": text})
 
+        if not end_reason and self._model_hangup:
+            end_reason = "agent wrapped up"
         if end_reason:
             if end_reason == "not interested":
                 await self.tools.run("set_outcome", json.dumps({"outcome": "not_interested", "notes": "declined twice"}))
@@ -562,6 +605,9 @@ class LocalVoiceSession:
 
         def flush(piece: str) -> None:
             clean = speakable(piece)
+            # Keep a trailing clause comma so the voice still pauses there.
+            if clean and piece.rstrip()[-1:] in ",;:":
+                clean += ","
             if clean:
                 spoken.append(clean)
                 queue.put_nowait(clean)
@@ -569,12 +615,16 @@ class LocalVoiceSession:
         try:
             async for chunk in source if source is not None else self.llm.chat_stream(messages):
                 pending += chunk
-                last = None
-                for m in _SENTENCE_END.finditer(pending):
-                    last = m
-                if last is not None:
-                    flush(pending[: last.end()])
-                    pending = pending[last.end():]
+                if _END_MARK.search(pending):
+                    self._model_hangup = True
+                    pending = _END_MARK.sub(" ", pending)
+                while (cut := _next_cut(pending, first=not spoken)) is not None:
+                    flush(pending[:cut])
+                    pending = pending[cut:]
+            if "[" in pending:
+                pending, fragment = pending[: pending.index("[")], pending[pending.index("["):]
+                if fragment.upper().startswith("[END"):
+                    self._model_hangup = True
             tail = pending.strip()
             # A tail without punctuation was cut off by num_predict; drop it if we already said something.
             if tail and (tail[-1] in ".!?" or not spoken):

@@ -59,6 +59,11 @@ class Settings:
     piper_bin: str
     piper_model: str
     whisper_model: str
+    tts_engine: str = "kokoro"
+    kokoro_model: str = ""
+    kokoro_voices: str = ""
+    kokoro_voice: str = "af_heart"
+    kokoro_speed: float = 1.0
 
     @property
     def openai_configured(self) -> bool:
@@ -185,4 +190,9 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         piper_bin=os.environ.get("PIPER_BIN", str(_DEFAULT_PIPER_DIR / "piper" / "piper")),
         piper_model=os.environ.get("PIPER_MODEL", str(_DEFAULT_PIPER_DIR / "en_US-ryan-high.onnx")),
         whisper_model=os.environ.get("WHISPER_MODEL", "tiny.en"),
+        tts_engine=os.environ.get("TTS_ENGINE", "kokoro").strip().lower() or "kokoro",
+        kokoro_model=os.environ.get("KOKORO_MODEL", str(data_dir / "kokoro" / "kokoro-v1.0.onnx")),
+        kokoro_voices=os.environ.get("KOKORO_VOICES", str(data_dir / "kokoro" / "voices-v1.0.bin")),
+        kokoro_voice=os.environ.get("KOKORO_VOICE", "af_heart"),
+        kokoro_speed=float(os.environ.get("KOKORO_SPEED", "1.0") or 1.0),
     )

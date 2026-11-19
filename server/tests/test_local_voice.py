@@ -159,6 +159,36 @@ async def test_local_session_declining_twice_ends_call(db, make_settings):
     await session.stop("test")
 
 
+class ScriptLLM(FakeLLM):
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = replies
+        self.seen = []
+
+    async def chat_stream(self, messages):
+        self.seen.append(messages[-1]["content"])
+        for piece in self.replies.pop(0):
+            yield piece
+
+
+async def test_cloud_model_gets_no_canned_nudge_and_can_end_the_call(db, make_settings):
+    settings = make_settings(voice_backend="gemini", gemini_api_key="g-test")
+    transport, spoken = FakeTransport(), []
+    llm = ScriptLLM([
+        ["Hey, it's Alex with Stellar Technologies, ", "got a quick minute? "],
+        ["Totally get it, thanks for your time. Have a good one! [END", "_CALL]"],
+    ])
+    session = make_session(db, settings, transport, llm, ["x"], spoken)
+    assert "Delaware" in session.messages[0]["content"]
+    await session._respond(user_text="Hello?")
+    await session._respond(user_text="No thanks, not interested.")
+    assert llm.seen[-1] == "No thanks, not interested."
+    assert spoken[:2] == ["Hey, it's Alex with Stellar Technologies,", "got a quick minute?"]
+    assert not any("END" in s for s in spoken)
+    assert session._hangup_reason == "agent wrapped up"
+    await session.stop("test")
+
+
 def test_silero_ignores_noise():
     ep = SileroEndpointer(in_rate=24000)
     n = 24000 * 3

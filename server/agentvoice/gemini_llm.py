@@ -77,10 +77,7 @@ class GeminiClient:
         # Tool calling stays rule-driven for Talk; Gemini is used for speech only.
         del tools
         system, contents = _to_gemini_messages(messages)
-        body: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 120, "topP": 0.9},
-        }
+        body: dict[str, Any] = {"contents": contents, "generationConfig": _speech_config()}
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         resp = await self._client.post(
@@ -96,10 +93,7 @@ class GeminiClient:
 
     async def chat_stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
         system, contents = _to_gemini_messages(messages)
-        body: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 120, "topP": 0.9},
-        }
+        body: dict[str, Any] = {"contents": contents, "generationConfig": _speech_config()}
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         url = f"{API_ROOT}/models/{self.model}:streamGenerateContent"
@@ -148,6 +142,16 @@ class GeminiClient:
             return json.loads(content)
         except json.JSONDecodeError:
             return {}
+
+
+def _speech_config() -> dict[str, Any]:
+    # Thinking tokens count against maxOutputTokens and delay the first word; a phone turn doesn't need them.
+    return {
+        "temperature": 0.8,
+        "maxOutputTokens": 220,
+        "topP": 0.95,
+        "thinkingConfig": {"thinkingBudget": 0},
+    }
 
 
 def _gemini_error_message(status: int, body_text: str) -> str:
