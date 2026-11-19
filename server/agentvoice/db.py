@@ -342,6 +342,14 @@ class Database:
                 [json.dumps(merged), now_iso(), lead_id],
             )
 
+    def mark_lead_dialing(self, lead_id: int) -> None:
+        ts = now_iso()
+        self._exec(
+            "UPDATE leads SET status = 'calling', status_reason = '', next_attempt_at = NULL, "
+            "attempts = attempts + 1, last_attempt_at = ?, updated_at = ? WHERE id = ?",
+            [ts, ts, lead_id],
+        )
+
     def delete_lead(self, lead_id: int) -> None:
         self._exec("DELETE FROM leads WHERE id = ?", [lead_id])
 

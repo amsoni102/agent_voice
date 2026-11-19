@@ -33,6 +33,7 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     openai_api_key: str
     realtime_model: str
+    realtime_url: str
     summary_model: str
     twilio_account_sid: str
     twilio_auth_token: str
@@ -79,6 +80,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
     return Settings(
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         realtime_model=os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime"),
+        realtime_url=os.environ.get("OPENAI_REALTIME_URL", "wss://api.openai.com/v1/realtime"),
         summary_model=os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-4o-mini"),
         twilio_account_sid=os.environ.get("TWILIO_ACCOUNT_SID", ""),
         twilio_auth_token=os.environ.get("TWILIO_AUTH_TOKEN", ""),
