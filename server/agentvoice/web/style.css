@@ -107,3 +107,5 @@ tr.click:hover td { background: var(--panel-2); }
   .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
   .login-card { width: min(360px, calc(100vw - 32px)); }
 }
+
+.msg.partial { opacity: .6; font-style: italic; }

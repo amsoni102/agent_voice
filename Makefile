@@ -50,17 +50,18 @@ run: install
 
 stop:
 	@# Stop systemd user service if this machine uses it.
-	@-systemctl --user stop agentvoice.service 2>/dev/null || true
+	@systemctl --user stop agentvoice.service 2>/dev/null || true
 	@# Free HTTP/HTTPS listeners (make run / background leftovers).
-	@-fuser -k $(PORT)/tcp >/dev/null 2>&1 || true
+	@fuser -k $(PORT)/tcp >/dev/null 2>&1 || true
 	@if [ -n "$(HTTPS_PORT)" ] && [ "$(HTTPS_PORT)" != "0" ]; then \
 		fuser -k $(HTTPS_PORT)/tcp >/dev/null 2>&1 || true; \
 	fi
-	@-pkill -f 'agentvoice .*serve' 2>/dev/null || true
+	@# Match the real binary only — a broad pkill pattern can kill this recipe's shell.
+	@pkill -f '[.]venv/bin/agentvoice .*serve' 2>/dev/null || true
 	@sleep 0.3
-	@if ss -ltn 2>/dev/null | grep -qE ":$(PORT)\s|:$(HTTPS_PORT)\s"; then \
+	@if ss -ltn 2>/dev/null | grep -qE ":$(PORT)[[:space:]]|:$(HTTPS_PORT)[[:space:]]"; then \
 		echo "Something is still listening on $(PORT)/$(HTTPS_PORT)."; \
-		ss -ltnp 2>/dev/null | grep -E ":$(PORT)\s|:$(HTTPS_PORT)\s" || true; \
+		ss -ltnp 2>/dev/null | grep -E ":$(PORT)[[:space:]]|:$(HTTPS_PORT)[[:space:]]" || true; \
 		exit 1; \
 	fi
 	@echo "AgentVoice stopped (ports $(PORT) / $(HTTPS_PORT))."

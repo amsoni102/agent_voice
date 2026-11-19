@@ -609,7 +609,11 @@ const Practice = {
       const wait = Math.max(0, (this.playhead - this.ctx.currentTime) * 1000);
       setTimeout(() => this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "mark", name: m.name })), wait);
     } else if (m.type === "event" && m.event) {
-      if (m.event.type === "transcript") {
+      if (m.event.type === "partial_transcript") {
+        setPartialLine(m.event.text);
+        $("#pr-status").textContent = "Listening…";
+      } else if (m.event.type === "transcript") {
+        if (m.event.role === "prospect") $("#pr-partial")?.remove();
         addPracticeLine(m.event.role, m.event.text);
         if (m.event.role === "prospect") $("#pr-status").textContent = "Heard you — thinking…";
         if (m.event.role === "agent") $("#pr-status").textContent = "Agent speaking…";
@@ -670,7 +674,21 @@ const Practice = {
 
 function addPracticeLine(role, text) {
   const box = $("#pr-transcript"); if (!box) return;
-  box.insertAdjacentHTML("beforeend", `<div class="msg ${esc(role)}">${role === "tool" ? "" : `<div class="who">${role === "agent" ? "Agent" : "You"}</div>`}${esc(text)}</div>`);
+  const partial = $("#pr-partial");
+  const html = `<div class="msg ${esc(role)}">${role === "tool" ? "" : `<div class="who">${role === "agent" ? "Agent" : "You"}</div>`}${esc(text)}</div>`;
+  if (partial) partial.insertAdjacentHTML("beforebegin", html);
+  else box.insertAdjacentHTML("beforeend", html);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setPartialLine(text) {
+  const box = $("#pr-transcript"); if (!box || !text) return;
+  let el = $("#pr-partial");
+  if (!el) {
+    box.insertAdjacentHTML("beforeend", `<div id="pr-partial" class="msg prospect partial"><div class="who">You</div><span></span></div>`);
+    el = $("#pr-partial");
+  }
+  el.querySelector("span").textContent = text + " …";
   box.scrollTop = box.scrollHeight;
 }
 

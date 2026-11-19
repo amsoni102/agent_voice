@@ -1,8 +1,12 @@
 import asyncio
 import base64
 
+import random
+import struct
+
 from agentvoice.audio_util import EnergyVad, resample_s16, split_sentences
 from agentvoice.local_voice import LocalVoiceSession, classify_intent
+from agentvoice.vad import SileroEndpointer, VadEvent
 from agentvoice.ollama_llm import _window, chat_tools, clean_tool_args, speakable
 from agentvoice.realtime import Transport
 
@@ -155,6 +159,80 @@ async def test_local_session_declining_twice_ends_call(db, make_settings):
     await session.stop("test")
 
 
+def test_silero_ignores_noise():
+    ep = SileroEndpointer(in_rate=24000)
+    n = 24000 * 3
+    noise = struct.pack(f"<{n}h", *(random.randint(-1500, 1500) for _ in range(n)))
+    events = []
+    for i in range(0, len(noise), 1920):
+        events += ep.push(noise[i:i + 1920])
+    assert not events and not ep.in_speech
+
+
+class CountingLLM(FakeLLM):
+    def __init__(self):
+        super().__init__()
+        self.streams = 0
+
+    async def chat_stream(self, messages):
+        self.streams += 1
+        async for piece in super().chat_stream(messages):
+            yield piece
+
+
+async def wait_for(cond, tries=60):
+    for _ in range(tries):
+        if cond():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_early_transcript_and_reply_are_reused_at_end_of_turn(db, make_settings):
+    settings = make_settings(openai_api_key="", voice_backend="ollama")
+    transport, spoken, llm = FakeTransport(), [], CountingLLM()
+    stt_calls = []
+
+    session = make_session(db, settings, transport, llm, ["Yeah we have a site."], spoken)
+    real_transcribe = session._transcribe
+
+    async def transcribe(pcm, rate, model):
+        stt_calls.append(len(pcm))
+        return await real_transcribe(pcm, rate, model)
+
+    session._transcribe = transcribe
+    session.messages.append({"role": "assistant", "content": "Hi, it's Alex."})
+    audio = b"\x01\x00" * 16000
+    await session._on_vad_event(VadEvent("start"))
+    await session._on_vad_event(VadEvent("pause", audio))
+    await asyncio.sleep(0.05)  # speculation runs during the pause
+    await session._on_vad_event(VadEvent("end", audio))
+    assert await wait_for(lambda: any(
+        isinstance(e, dict) and e.get("type") == "transcript" and e.get("role") == "agent" for e in transport.events
+    ))
+    assert len(stt_calls) == 1 and llm.streams == 1
+    assert spoken
+    await session.stop("test")
+
+
+async def test_mid_sentence_pause_becomes_partial_and_drops_speculation(db, make_settings):
+    settings = make_settings(openai_api_key="", voice_backend="ollama")
+    transport, spoken, llm = FakeTransport(), [], CountingLLM()
+    session = make_session(db, settings, transport, llm, ["We have a"], spoken)
+    session.messages.append({"role": "assistant", "content": "Hi, it's Alex."})
+    audio = b"\x01\x00" * 8000
+    await session._on_vad_event(VadEvent("start"))
+    await session._on_vad_event(VadEvent("pause", audio))
+    spec = session._spec
+    await session._on_vad_event(VadEvent("resume"))
+    assert session._spec is None and spec is not None
+    assert await wait_for(lambda: any(
+        isinstance(e, dict) and e.get("type") == "partial_transcript" for e in transport.events
+    ))
+    assert not any(isinstance(e, dict) and e.get("type") == "transcript" for e in transport.events)
+    await session.stop("test")
+
+
 async def test_local_session_transcribes_and_speaks(db, make_settings):
     settings = make_settings(openai_api_key="", voice_backend="ollama")
     call = db.create_call(phone="", lead_id=None, campaign_id=None, kind="practice")
@@ -187,6 +265,7 @@ async def test_local_session_transcribes_and_speaks(db, make_settings):
         transcribe=transcribe,
         speak=speak,
     )
+    session.endpointer = None  # exercise the energy-VAD fallback with a synthetic tone
     await session.start()
     pcm = base64.b64encode(b"\xff\x7f" * 480 * 10).decode()
     await session.feed_audio(pcm)
